@@ -1,0 +1,15 @@
+{
+    "enabled_groups": [],
+    "enabled_private": true,
+    "max_triggered_messages": 8,
+    "max_normal_messages": 12,
+    "max_image_messages": 4,
+    "enable_image_caption": true,
+    "enable_atmosphere_analysis": true,
+    "min_normal_messages_for_context": 3,
+    "ignore_bot_messages": false,
+    "safe_mode": false,
+    "collect_bot_replies": true,
+    "max_bot_replies": 5,
+    "bot_self_reference": "你"
+}

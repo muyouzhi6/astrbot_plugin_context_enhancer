@@ -11,6 +11,16 @@ from collections import deque
 import os
 from typing import Dict, Any
 
+# 导入工具模块
+try:
+    from utils.image_caption import ImageCaptionUtils
+    from utils.message_utils import MessageUtils
+except ImportError:
+    # 如果导入失败，设置为 None，程序仍能正常运行
+    ImageCaptionUtils = None
+    MessageUtils = None
+    logger.warning("utils 模块导入失败，将使用基础功能")
+
 
 # 消息类型枚举 - 重命名以避免冲突
 class ContextMessageType:
@@ -94,8 +104,41 @@ class GroupMessage:
                     images.append(comp)
         return images
 
-    def format_for_display(self, include_images=True) -> str:
-        """格式化消息用于显示"""
+    async def format_for_display_async(
+        self, include_images=True, message_utils=None
+    ) -> str:
+        """异步格式化消息用于显示，支持高级消息处理"""
+        time_str = self.timestamp.strftime("%H:%M")
+
+        # 如果提供了 MessageUtils，尝试使用高级格式化
+        if message_utils and self.event.message_obj and self.event.message_obj.message:
+            try:
+                # 使用 MessageUtils 的高级格式化功能
+                formatted_text = await message_utils.outline_message_list(
+                    self.event.message_obj.message
+                )
+                if formatted_text:
+                    result = f"[{time_str}] {self.sender_name}: {formatted_text}"
+                else:
+                    # 降级到简单格式化
+                    result = f"[{time_str}] {self.sender_name}: {self.text_content}"
+            except Exception:
+                # 降级到简单格式化
+                result = f"[{time_str}] {self.sender_name}: {self.text_content}"
+        else:
+            # 简单格式化
+            result = f"[{time_str}] {self.sender_name}: {self.text_content}"
+
+        if include_images and self.has_image:
+            result += f" [包含{len(self.images)}张图片"
+            if self.image_captions:
+                result += f" - {'; '.join(self.image_captions)}"
+            result += "]"
+
+        return result
+
+    def format_for_display(self, include_images=True, message_utils=None) -> str:
+        """同步格式化消息用于显示（保持兼容性）"""
         time_str = self.timestamp.strftime("%H:%M")
         result = f"[{time_str}] {self.sender_name}: {self.text_content}"
 
@@ -145,6 +188,28 @@ class ContextEnhancerV2(Star):
         self.context = context
         self.config = self.load_config()
         logger.info("上下文增强器v2.0已初始化")
+
+        # 初始化工具类
+        try:
+            if ImageCaptionUtils is not None:
+                self.image_caption_utils = ImageCaptionUtils(
+                    context, context.get_config()
+                )
+                logger.debug("ImageCaptionUtils 初始化成功")
+            else:
+                self.image_caption_utils = None
+                logger.warning("ImageCaptionUtils 不可用，将使用基础图片处理")
+
+            if MessageUtils is not None:
+                self.message_utils = MessageUtils(context.get_config(), context)
+                logger.debug("MessageUtils 初始化成功")
+            else:
+                self.message_utils = None
+                logger.warning("MessageUtils 不可用，将使用基础消息格式化")
+        except Exception as e:
+            logger.error(f"工具类初始化失败: {e}")
+            self.image_caption_utils = None
+            self.message_utils = None
 
         # 群聊消息缓存 - 每个群独立存储
         self.group_messages = {}  # group_id -> deque of GroupMessage
@@ -239,9 +304,16 @@ class ContextEnhancerV2(Star):
             return self.config.get("enabled_private", True)
         else:
             enabled_groups = self.config.get("enabled_groups", [])
+            group_id = event.get_group_id()
+            logger.debug(f"群聊启用检查: 群ID={group_id}, 启用列表={enabled_groups}")
+            
             if not enabled_groups:  # 空列表表示对所有群生效
+                logger.debug("空的启用列表，对所有群生效")
                 return True
-            return event.get_group_id() in enabled_groups
+            
+            result = group_id in enabled_groups
+            logger.debug(f"群聊启用结果: {result}")
+            return result
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.ALL)
     async def on_message(self, event: AstrMessageEvent):
@@ -274,20 +346,46 @@ class ContextEnhancerV2(Star):
             # 创建消息对象
             group_msg = GroupMessage(event, message_type)
 
-            # 生成图片占位符
+            # 生成图片描述
             if group_msg.has_image and self.config.get("enable_image_caption", True):
-                self._generate_image_placeholders(group_msg)
+                await self._generate_image_captions(group_msg)
 
-            # 添加到缓冲区
+            # 添加到缓冲区前进行去重检查
             buffer = self._get_group_buffer(group_msg.group_id)
-            buffer.append(group_msg)
 
-            logger.debug(
-                f"收集群聊消息 [{message_type}]: {group_msg.sender_name} - {group_msg.text_content[:50]}..."
-            )
+            # 🚨 防重复机制：检查是否已存在相同消息
+            if not self._is_duplicate_message(buffer, group_msg):
+                buffer.append(group_msg)
+                logger.debug(
+                    f"收集群聊消息 [{message_type}]: {group_msg.sender_name} - {group_msg.text_content[:50]}..."
+                )
+            else:
+                logger.debug(
+                    f"跳过重复消息: {group_msg.sender_name} - {group_msg.text_content[:30]}..."
+                )
 
         except Exception as e:
             logger.error(f"处理群聊消息时发生错误: {e}")
+
+    def _is_duplicate_message(self, buffer: deque, new_msg) -> bool:
+        """检查消息是否已存在于缓冲区（防重复）"""
+        # 检查最近5条消息即可，避免性能问题
+        recent_messages = list(buffer)[-5:] if buffer else []
+
+        for existing_msg in recent_messages:
+            # 重复判断条件：
+            # 1. 相同发送者
+            # 2. 相同内容（或内容高度相似）
+            # 3. 时间差在30秒内
+            if (
+                existing_msg.sender_id == new_msg.sender_id
+                and existing_msg.text_content == new_msg.text_content
+                and abs((new_msg.timestamp - existing_msg.timestamp).total_seconds())
+                < 30
+            ):
+                return True
+
+        return False
 
     def _is_bot_message(self, event: AstrMessageEvent) -> bool:
         """检查是否是机器人自己发送的消息"""
@@ -395,20 +493,84 @@ class ContextEnhancerV2(Star):
             keyword in message_text for keyword in ContextConstants.TRIGGER_KEYWORDS
         )
 
-    def _generate_image_placeholders(self, group_msg: GroupMessage):
-        """为图片生成简单的占位符"""
+    async def _generate_image_captions(self, group_msg: GroupMessage):
+        """为图片生成智能描述，使用高级图片分析功能"""
         try:
-            # 这里可以集成图片描述功能
-            # 暂时使用简单的占位符
+            if not group_msg.images:
+                return
+
+            # 检查是否启用图片描述
+            if not self.config.get("enable_image_caption", True):
+                # 如果禁用，使用简单占位符
+                for i, img in enumerate(group_msg.images):
+                    group_msg.image_captions.append(f"图片{i + 1}")
+                return
+
+            # 使用高级图片描述功能
+            captions = []
+            for i, img in enumerate(group_msg.images):
+                try:
+                    # 获取图片的URL或路径
+                    image_data = getattr(img, "url", None) or getattr(img, "file", None)
+                    if image_data and self.image_caption_utils is not None:
+                        # 调用图片描述工具
+                        caption = await self.image_caption_utils.generate_image_caption(
+                            image_data, timeout=10
+                        )
+                        if caption:
+                            captions.append(f"图片{i + 1}: {caption}")
+                        else:
+                            captions.append(f"图片{i + 1}")
+                    else:
+                        captions.append(f"图片{i + 1}")
+                except Exception as e:
+                    logger.debug(f"生成图片{i + 1}描述失败: {e}")
+                    captions.append(f"图片{i + 1}")
+
+            group_msg.image_captions = captions
+
+        except Exception as e:
+            logger.warning(f"生成图片描述时发生错误: {e}")
+            # 降级到简单占位符
             for i, img in enumerate(group_msg.images):
                 group_msg.image_captions.append(f"图片{i + 1}")
-        except Exception as e:
-            logger.warning(f"生成图片占位符时发生错误: {e}")
 
     @filter.on_llm_request(priority=100)  # 🔧 使用较低优先级，避免干扰其他插件
     async def on_llm_request(self, event: AstrMessageEvent, request: ProviderRequest):
         """LLM请求时提供增强的上下文"""
         try:
+            # 🚨 强化防止无限循环：多重检测机制
+            if request.prompt:
+                # 检测1：插件特征文本
+                loop_indicators = [
+                    "=== 最近和你相关的对话 ===",
+                    "=== 当前需要你回复的请求 ===",
+                    "=== 最近群聊内容 ===",
+                    "=== 最近图片 ===",
+                    "请基于以上完整的群聊上下文信息",
+                    "Context Enhancer",
+                    "上下文增强",
+                ]
+
+                if any(indicator in request.prompt for indicator in loop_indicators):
+                    logger.debug("检测到已增强的内容，跳过重复处理，防止无限循环")
+                    return
+
+                # 检测2：内容长度异常（超过8000字符可能是重复增强）
+                if len(request.prompt) > 8000:
+                    logger.warning(
+                        f"检测到异常长的prompt（{len(request.prompt)}字符），疑似重复增强，跳过处理"
+                    )
+                    return
+
+                # 检测3：重复模式检测
+                if (
+                    "Mnemosyne" in request.prompt
+                    and request.prompt.count("Mnemosyne") > 3
+                ):
+                    logger.warning("检测到重复的Mnemosyne内容，跳过处理")
+                    return
+
             # 🔍 调试信息：记录接收到的请求状态
             logger.debug("Context Enhancer接收到LLM请求:")
             logger.debug(
@@ -502,18 +664,11 @@ class ContextEnhancerV2(Star):
             "normal_messages": [],
             "image_messages": [],
             "bot_replies": [],  # 🤖 机器人回复消息
-            "conversation_history": [],
             "atmosphere_summary": "",
         }
 
-        # 从数据库获取对话历史
-        if request.conversation and request.conversation.history:
-            try:
-                history_raw = json.loads(request.conversation.history)
-                context_info["conversation_history"] = history_raw
-            except (json.JSONDecodeError, TypeError) as e:
-                logger.debug(f"解析对话历史失败: {e}")
-                pass
+        # 🎯 参考SpectreCore方式：完全不使用request.conversation.history
+        # 避免套娃问题，只使用我们自己控制的群聊消息缓存
 
         # 获取群聊消息缓存
         if event.get_message_type() == MessageType.GROUP_MESSAGE:
@@ -523,8 +678,11 @@ class ContextEnhancerV2(Star):
                 else event.unified_msg_origin
             )
             buffer = self._get_group_buffer(group_id)
+            logger.debug(f"群聊消息缓存大小: {len(buffer)}")
 
             await self._collect_recent_messages(buffer, context_info)
+            
+            logger.debug(f"收集到的消息数量: 普通={len(context_info['normal_messages'])}, 触发={len(context_info['triggered_messages'])}, 图片={len(context_info['image_messages'])}, 机器人回复={len(context_info['bot_replies'])}")
 
         return context_info
 
@@ -571,11 +729,11 @@ class ContextEnhancerV2(Star):
         if len(context_info["normal_messages"]) >= self.config.get(
             "min_normal_messages_for_context", 3
         ):
-            context_info["atmosphere_summary"] = await self._analyze_atmosphere(
+            context_info["atmosphere_summary"] = self._analyze_atmosphere(
                 context_info["normal_messages"]
             )
 
-    async def _analyze_atmosphere(self, normal_messages: list) -> str:
+    def _analyze_atmosphere(self, normal_messages: list) -> str:
         """分析群聊氛围"""
         if not normal_messages:
             return ""
@@ -598,7 +756,7 @@ class ContextEnhancerV2(Star):
     async def _build_enhanced_prompt(
         self, context_info: dict, original_prompt: str
     ) -> str:
-        """构建增强的prompt - 按照清晰的信息层次结构"""
+        """构建增强的prompt - 按照清晰的信息层次结构，使用高级消息格式化"""
         sections = []
         bot_reference = self.config.get("bot_self_reference", "你")
 
@@ -612,7 +770,18 @@ class ContextEnhancerV2(Star):
         if context_info.get("normal_messages"):
             sections.append("=== 最近群聊内容 ===")
             for msg in context_info["normal_messages"][-10:]:  # 增加普通消息数量
-                sections.append(msg.format_for_display())
+                # 尝试使用高级格式化
+                try:
+                    if self.message_utils is not None:
+                        formatted_msg = await msg.format_for_display_async(
+                            include_images=True, message_utils=self.message_utils
+                        )
+                        sections.append(formatted_msg)
+                    else:
+                        sections.append(msg.format_for_display())
+                except Exception:
+                    # 降级到简单格式化
+                    sections.append(msg.format_for_display())
             sections.append("")
 
         # 第三层：最近和你相关的对话（触发了LLM回复的对话内容）
@@ -639,26 +808,29 @@ class ContextEnhancerV2(Star):
 
             # 显示最近的互动
             for interaction_type, msg in all_interactions[-10:]:
-                if interaction_type == "triggered":
-                    sections.append(f"👤 {msg.format_for_display()}")
-                elif interaction_type == "bot_reply":
-                    sections.append(f"🤖 {msg.format_for_display()}")
-
-            # 如果有对话历史数据库记录，也添加进来
-            if context_info.get("conversation_history"):
-                sections.append("# 从对话历史记录补充：")
-                for record in context_info["conversation_history"][-8:]:
-                    role = record.get("role", "unknown")
-                    content = record.get("content", "")
-                    timestamp = record.get("timestamp", "")
-                    if role == "user":
-                        sections.append(f"👤 [{timestamp}] 用户: {content}")
-                    elif role == "assistant":
-                        sections.append(f"🤖 [{timestamp}] {bot_reference}: {content}")
+                try:
+                    if self.message_utils is not None:
+                        formatted_msg = await msg.format_for_display_async(
+                            include_images=True, message_utils=self.message_utils
+                        )
+                        if interaction_type == "triggered":
+                            sections.append(f"👤 {formatted_msg}")
+                        elif interaction_type == "bot_reply":
+                            sections.append(f"🤖 {formatted_msg}")
+                    else:
+                        if interaction_type == "triggered":
+                            sections.append(f"👤 {msg.format_for_display()}")
+                        elif interaction_type == "bot_reply":
+                            sections.append(f"🤖 {msg.format_for_display()}")
+                except Exception:
+                    # 降级到简单格式化
+                    if interaction_type == "triggered":
+                        sections.append(f"👤 {msg.format_for_display()}")
+                    elif interaction_type == "bot_reply":
+                        sections.append(f"🤖 {msg.format_for_display()}")
 
         if not any(
-            context_info.get(key)
-            for key in ["triggered_messages", "bot_replies", "conversation_history"]
+            context_info.get(key) for key in ["triggered_messages", "bot_replies"]
         ):
             sections.append("（暂无相关对话记录）")
         sections.append("")
@@ -667,7 +839,16 @@ class ContextEnhancerV2(Star):
         if context_info.get("image_messages"):
             sections.append("=== 最近图片 ===")
             for msg in context_info["image_messages"][-5:]:
-                sections.append(f"📷 {msg.format_for_display()}")
+                try:
+                    if self.message_utils is not None:
+                        formatted_msg = await msg.format_for_display_async(
+                            include_images=True, message_utils=self.message_utils
+                        )
+                        sections.append(f"📷 {formatted_msg}")
+                    else:
+                        sections.append(f"📷 {msg.format_for_display()}")
+                except Exception:
+                    sections.append(f"📷 {msg.format_for_display()}")
             sections.append("")
 
         # 第五层：当前需要回复的请求（最详细）
@@ -689,6 +870,9 @@ class ContextEnhancerV2(Star):
         if not sections:
             return original_prompt
 
+        # 🚨 最终去重：移除重复的行内容
+        sections = self._remove_duplicate_lines(sections)
+
         enhanced_context = "\n".join(sections)
 
         final_prompt = f"""{enhanced_context}请基于以上完整的群聊上下文信息，自然、智能地回复当前请求。注意理解群聊氛围和对话语境，保持对话的连续性和相关性。
@@ -696,3 +880,31 @@ class ContextEnhancerV2(Star):
 当前用户请求: {original_prompt}"""
 
         return final_prompt
+
+    def _remove_duplicate_lines(self, sections: list) -> list:
+        """移除重复的行内容（最终防重复机制）"""
+        seen_lines = set()
+        deduplicated = []
+
+        for section in sections:
+            lines = section.split("\n")
+            section_lines = []
+
+            for line in lines:
+                line_clean = line.strip()
+                # 跳过空行和标题行
+                if not line_clean or line_clean.startswith("==="):
+                    section_lines.append(line)
+                    continue
+
+                # 对于内容行，检查是否重复
+                content_key = line_clean[:100]  # 取前100字符作为唯一标识
+                if content_key not in seen_lines:
+                    seen_lines.add(content_key)
+                    section_lines.append(line)
+                # 重复的行被跳过
+
+            if section_lines:
+                deduplicated.append("\n".join(section_lines))
+
+        return deduplicated
