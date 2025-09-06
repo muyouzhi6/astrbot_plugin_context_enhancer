@@ -2,4 +2,6 @@ name: "上下文增强器"
 author: "木有知"
 version: "2.0.0"
 description: "上下文增强插件，让bot更好的理解对话。通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境。"
+repo: "https://github.com/muyouzhi6/astrbot_plugin_context_enhancer"
+
 
