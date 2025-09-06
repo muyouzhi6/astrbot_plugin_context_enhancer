@@ -62,9 +62,9 @@ class GroupMessage:
         return result
 
 @register(
-    "astrbot_plugin_context_enhancer",
+    "context_enhancer_v2",
     "木有知", 
-    "上下文增强插件，让bot更好的理解对话。通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境。",
+    "智能群聊上下文增强插件v2.0，提供强大的'读空气'功能。通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境，支持角色扮演，完全兼容人设系统。",
     "2.0.0"
 )
 class ContextEnhancerV2(Star):
@@ -473,7 +473,7 @@ class ContextEnhancerV2(Star):
                     all_interactions.append(("triggered", msg))
             
             if context_info.get("bot_replies"):
-                for msg in context_info["bot_replies"]:
+                for msg 在 context_info["bot_replies"]:
                     all_interactions.append(("bot_reply", msg))
             
             # 按时间戳排序
@@ -492,7 +492,7 @@ class ContextEnhancerV2(Star):
                 for record 在 context_info["conversation_history"][-8:]:
                     role = record.get("role", "unknown")
                     content = record.get("content"， "")
-                    timestamp = record.get("timestamp"， "")
+                    timestamp = record.get("timestamp", "")
                     if role == "user":
                         sections.append(f"👤 [{timestamp}] 用户: {content}")
                     elif role == "assistant":
@@ -505,7 +505,7 @@ class ContextEnhancerV2(Star):
         # 第四层：最近图片信息
         if context_info.get("image_messages"):
             sections.append("=== 最近图片 ===")
-            for msg in context_info["image_messages"][-5:]:
+            for msg 在 context_info["image_messages"][-5:]:
                 sections.append(f"📷 {msg.format_for_display()}")
             sections.append("")
 
@@ -517,7 +517,7 @@ class ContextEnhancerV2(Star):
         sections.append(f"💬 请求内容: {original_prompt}")
         
         # 检查是否有特殊触发标记
-        if "@" in original_prompt:
+        if "@" 在 original_prompt:
             sections.append(f"🎯 触发方式: @提及")
         
         sections.append("")
@@ -526,11 +526,10 @@ class ContextEnhancerV2(Star):
         if not sections:
             return original_prompt
 
-        enhanced_context = "\n".join(sections)
+        enhanced_context = "\n"。join(sections)
         
         final_prompt = f"""{enhanced_context}请基于以上完整的群聊上下文信息，自然、智能地回复当前请求。注意理解群聊氛围和对话语境，保持对话的连续性和相关性。
 
 当前用户请求: {original_prompt}"""
 
         return final_prompt
-
