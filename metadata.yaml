@@ -1,4 +1,6 @@
-name: "上下文增强器"
+name: "astrbot_plugin_context_enhancer"
 author: "木有知"
 version: "2.0.0"
-description: "智能群聊上下文增强插件，提供'读空气'功能。通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境，支持角色扮演，完全兼容人设系统。"
+description: "上下文增强插件，让bot更好的理解对话。通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境。"
+repo: "https://github.com/muyouzhi6/astrbot_plugin_context_enhancer"
+
