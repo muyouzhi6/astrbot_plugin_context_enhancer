@@ -42,6 +42,8 @@ class ImageCaptionUtils:
         self,
         image: str,  # 图片的base64编码或URL
         timeout: int = 30,
+        provider_id: Optional[str] = None,  # 可选的提供商ID
+        custom_prompt: Optional[str] = None,  # 自定义提示词
     ) -> Optional[str]:
         """
         为单张图片生成文字描述
@@ -49,6 +51,8 @@ class ImageCaptionUtils:
         Args:
             image: 图片的base64编码或URL
             timeout: 超时时间（秒）
+            provider_id: 可选的提供商ID，如果为None则使用默认提供商
+            custom_prompt: 自定义提示词，如果为None则使用默认提示词
 
         Returns:
             生成的图片描述文本，如果失败则返回None
@@ -66,29 +70,51 @@ class ImageCaptionUtils:
             logger.warning("ImageCaptionUtils 未正确初始化")
             return None
 
-        # 检查是否已启用图片转述
-        image_processing_config = self.config.get("image_processing", {})
-        if not image_processing_config.get("use_image_caption", False):
-            return None
-
-        provider_id = image_processing_config.get("image_caption_provider_id", "")
-        # 获取提供商
-        if provider_id == "":
-            provider = self.context.get_using_provider()
-        else:
+        # 确定使用的提供商
+        if provider_id:
+            # 使用指定的提供商
             provider = self.context.get_provider_by_id(provider_id)
+            if not provider:
+                logger.warning(
+                    f"无法找到指定的图片描述提供商: {provider_id}，尝试使用默认提供商"
+                )
+                provider = self.context.get_using_provider()
+        else:
+            # 尝试从全局image_processing配置获取
+            image_processing_config = self.config.get("image_processing", {})
+            global_provider_id = image_processing_config.get(
+                "image_caption_provider_id", ""
+            )
+
+            if global_provider_id:
+                provider = self.context.get_provider_by_id(global_provider_id)
+                if not provider:
+                    logger.warning(
+                        f"无法找到全局配置的图片描述提供商: {global_provider_id}，使用默认提供商"
+                    )
+                    provider = self.context.get_using_provider()
+            else:
+                provider = self.context.get_using_provider()
 
         if not provider:
-            logger.warning(f"无法找到提供商: {provider_id if provider_id else '默认'}")
+            logger.warning("无法获取任何可用的LLM提供商")
             return None
+
+        # 确定使用的提示词
+        if custom_prompt:
+            prompt = custom_prompt
+        else:
+            # 尝试从全局配置获取
+            image_processing_config = self.config.get("image_processing", {})
+            prompt = image_processing_config.get(
+                "image_caption_prompt", "请直接简短描述这张图片"
+            )
 
         try:
             # 使用asyncio.wait_for添加超时控制
             llm_response = await asyncio.wait_for(
                 provider.text_chat(
-                    prompt=image_processing_config.get(
-                        "image_caption_prompt", "请直接简短描述这张图片"
-                    ),
+                    prompt=prompt,
                     contexts=[],
                     image_urls=[image],  # 图片链接，支持路径和网络链接
                     system_prompt="",  # 系统提示，可以不传

@@ -13,13 +13,18 @@ from typing import Dict, Any
 
 # 导入工具模块
 try:
-    from utils.image_caption import ImageCaptionUtils
-    from utils.message_utils import MessageUtils
+    from .utils.image_caption import ImageCaptionUtils
+    from .utils.message_utils import MessageUtils
 except ImportError:
-    # 如果导入失败，设置为 None，程序仍能正常运行
-    ImageCaptionUtils = None
-    MessageUtils = None
-    logger.warning("utils 模块导入失败，将使用基础功能")
+    try:
+        # 备用导入方式
+        from utils.image_caption import ImageCaptionUtils
+        from utils.message_utils import MessageUtils
+    except ImportError:
+        # 如果导入失败，设置为 None，程序仍能正常运行
+        ImageCaptionUtils = None
+        MessageUtils = None
+        logger.warning("utils 模块导入失败，将使用基础功能")
 
 
 # 消息类型枚举 - 重命名以避免冲突
@@ -217,9 +222,9 @@ class ContextEnhancerV2(Star):
 
         # 显示当前配置
         logger.info(
-            f"上下文增强器配置 - 触发消息: {self.config.get('max_triggered_messages', 10)}, "
-            f"普通消息: {self.config.get('max_normal_messages', 15)}, "
-            f"图片消息: {self.config.get('max_image_messages', 5)}"
+            f"上下文增强器配置 - 触发消息: {self.config.get('触发消息数量', 8)}, "
+            f"普通消息: {self.config.get('普通消息数量', 12)}, "
+            f"图片消息: {self.config.get('图片消息数量', 4)}"
         )
 
     def load_config(self) -> Dict[str, Any]:
@@ -244,19 +249,14 @@ class ContextEnhancerV2(Star):
     def get_default_config(self) -> Dict[str, Any]:
         """获取默认配置"""
         return {
-            "enabled_groups": [],  # 空列表表示对所有群生效
-            "enabled_private": True,
-            "max_triggered_messages": 10,  # 最近触发LLM的消息数量
-            "max_normal_messages": 15,  # 最近普通聊天消息数量
-            "max_image_messages": 5,  # 最近图片消息数量
-            "enable_image_caption": True,  # 是否启用图片描述
-            "enable_atmosphere_analysis": True,  # 是否分析群聊氛围
-            "min_normal_messages_for_context": 3,  # 至少多少条普通消息才提供上下文
-            "ignore_bot_messages": False,  # 🤖 是否忽略机器人消息（默认保留，保证上下文完整）
-            "safe_mode": True,  # 🔧 安全模式：出错时不影响其他插件
-            "collect_bot_replies": True,  # 🤖 是否收集机器人回复（补充数据库记录的不足）
-            "max_bot_replies": 8,  # 🤖 收集的机器人回复数量
-            "bot_self_reference": "你",  # 🎭 机器人自称（支持人设角色扮演）
+            "启用群组": [],  # 空列表表示对所有群生效
+            "普通消息数量": 12,  # 最近普通聊天消息数量
+            "触发消息数量": 8,  # 最近触发LLM的消息数量
+            "图片消息数量": 4,  # 最近图片消息数量
+            "启用图片描述": True,  # 是否启用图片描述
+            "处理@信息": True,  # 是否处理@信息
+            "收集机器人回复": True,  # 是否收集机器人回复
+            "机器人回复数量": 5,  # 机器人回复收集数量
         }
 
     def _get_group_buffer(self, group_id: str) -> deque:
@@ -272,9 +272,9 @@ class ContextEnhancerV2(Star):
 
         if group_id not in self.group_messages:
             max_total = (
-                self.config.get("max_triggered_messages", 10)
-                + self.config.get("max_normal_messages", 15)
-                + self.config.get("max_image_messages", 5)
+                self.config.get("触发消息数量", 8)
+                + self.config.get("普通消息数量", 12)
+                + self.config.get("图片消息数量", 4)
             ) * 2  # 预留空间
             self.group_messages[group_id] = deque(maxlen=max_total)
         return self.group_messages[group_id]
@@ -301,16 +301,16 @@ class ContextEnhancerV2(Star):
     def is_chat_enabled(self, event: AstrMessageEvent) -> bool:
         """检查当前聊天是否启用增强功能"""
         if event.get_message_type() == MessageType.FRIEND_MESSAGE:
-            return self.config.get("enabled_private", True)
+            return True  # 简化版本默认启用私聊
         else:
-            enabled_groups = self.config.get("enabled_groups", [])
+            enabled_groups = self.config.get("启用群组", [])
             group_id = event.get_group_id()
             logger.debug(f"群聊启用检查: 群ID={group_id}, 启用列表={enabled_groups}")
-            
+
             if not enabled_groups:  # 空列表表示对所有群生效
                 logger.debug("空的启用列表，对所有群生效")
                 return True
-            
+
             result = group_id in enabled_groups
             logger.debug(f"群聊启用结果: {result}")
             return result
@@ -332,13 +332,9 @@ class ContextEnhancerV2(Star):
     async def _handle_group_message(self, event: AstrMessageEvent):
         """处理群聊消息"""
         try:
-            # 🤖 机器人消息处理：根据配置决定是否收集
+            # 🤖 机器人消息处理：简化版本默认收集所有消息
             if self._is_bot_message(event):
-                if self.config.get("ignore_bot_messages", False):  # 默认不忽略
-                    logger.debug("跳过机器人自己的消息（配置启用过滤）")
-                    return
-                else:
-                    logger.debug("收集机器人自己的消息（保持上下文完整性）")
+                logger.debug("收集机器人自己的消息（保持上下文完整性）")
 
             # 判断消息类型
             message_type = self._classify_message(event)
@@ -347,7 +343,7 @@ class ContextEnhancerV2(Star):
             group_msg = GroupMessage(event, message_type)
 
             # 生成图片描述
-            if group_msg.has_image and self.config.get("enable_image_caption", True):
+            if group_msg.has_image and self.config.get("启用图片描述", True):
                 await self._generate_image_captions(group_msg)
 
             # 添加到缓冲区前进行去重检查
@@ -415,7 +411,7 @@ class ContextEnhancerV2(Star):
         """分类消息类型"""
 
         # 🤖 首先检查是否是机器人消息
-        if self._is_bot_message(event) and self.config.get("collect_bot_replies", True):
+        if self._is_bot_message(event) and self.config.get("收集机器人回复", True):
             return ContextMessageType.BOT_REPLY
 
         # 检查是否包含图片
@@ -494,13 +490,13 @@ class ContextEnhancerV2(Star):
         )
 
     async def _generate_image_captions(self, group_msg: GroupMessage):
-        """为图片生成智能描述，使用高级图片分析功能"""
+        """为图片生成智能描述，使用高级图片分析功能，支持独立的图片描述提供商"""
         try:
             if not group_msg.images:
                 return
 
             # 检查是否启用图片描述
-            if not self.config.get("enable_image_caption", True):
+            if not self.config.get("启用图片描述", True):
                 # 如果禁用，使用简单占位符
                 for i, img in enumerate(group_msg.images):
                     group_msg.image_captions.append(f"图片{i + 1}")
@@ -508,14 +504,26 @@ class ContextEnhancerV2(Star):
 
             # 使用高级图片描述功能
             captions = []
+            # 获取图片描述的特定配置
+            image_caption_provider_id = self.config.get("图片描述提供商ID", "")
+            image_caption_prompt = self.config.get(
+                "图片描述提示词",
+                "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息",
+            )
+
             for i, img in enumerate(group_msg.images):
                 try:
                     # 获取图片的URL或路径
                     image_data = getattr(img, "url", None) or getattr(img, "file", None)
                     if image_data and self.image_caption_utils is not None:
-                        # 调用图片描述工具
+                        # 调用图片描述工具，传入特定的提供商ID和提示词
                         caption = await self.image_caption_utils.generate_image_caption(
-                            image_data, timeout=10
+                            image_data,
+                            timeout=10,
+                            provider_id=image_caption_provider_id
+                            if image_caption_provider_id
+                            else None,
+                            custom_prompt=image_caption_prompt,
                         )
                         if caption:
                             captions.append(f"图片{i + 1}: {caption}")
@@ -537,94 +545,132 @@ class ContextEnhancerV2(Star):
 
     @filter.on_llm_request(priority=100)  # 🔧 使用较低优先级，避免干扰其他插件
     async def on_llm_request(self, event: AstrMessageEvent, request: ProviderRequest):
-        """LLM请求时提供增强的上下文"""
+        """LLM请求时提供简单直接的上下文增强"""
         try:
-            # 🚨 强化防止无限循环：多重检测机制
-            if request.prompt:
-                # 检测1：插件特征文本
-                loop_indicators = [
-                    "=== 最近和你相关的对话 ===",
-                    "=== 当前需要你回复的请求 ===",
-                    "=== 最近群聊内容 ===",
-                    "=== 最近图片 ===",
-                    "请基于以上完整的群聊上下文信息",
-                    "Context Enhancer",
-                    "上下文增强",
-                ]
-
-                if any(indicator in request.prompt for indicator in loop_indicators):
-                    logger.debug("检测到已增强的内容，跳过重复处理，防止无限循环")
-                    return
-
-                # 检测2：内容长度异常（超过8000字符可能是重复增强）
-                if len(request.prompt) > 8000:
-                    logger.warning(
-                        f"检测到异常长的prompt（{len(request.prompt)}字符），疑似重复增强，跳过处理"
-                    )
-                    return
-
-                # 检测3：重复模式检测
-                if (
-                    "Mnemosyne" in request.prompt
-                    and request.prompt.count("Mnemosyne") > 3
-                ):
-                    logger.warning("检测到重复的Mnemosyne内容，跳过处理")
-                    return
-
-            # 🔍 调试信息：记录接收到的请求状态
-            logger.debug("Context Enhancer接收到LLM请求:")
-            logger.debug(
-                f"  - prompt长度: {len(request.prompt) if request.prompt else 0}"
-            )
-            logger.debug(
-                f"  - system_prompt长度: {len(request.system_prompt) if request.system_prompt else 0}"
-            )
-            logger.debug(
-                f"  - contexts数量: {len(request.contexts) if request.contexts else 0}"
-            )
+            # 简单检测：避免重复增强
+            if request.prompt and "你正在浏览聊天软件" in request.prompt:
+                logger.debug("检测到已增强的内容，跳过重复处理")
+                return
 
             if not self.is_chat_enabled(event):
-                logger.debug("上下文增强器：当前聊天未启用，跳过增强。")
+                logger.debug("上下文增强器：当前聊天未启用，跳过增强")
                 return
 
-            logger.debug("上下文增强器v2：开始构建智能上下文...")
-
-            # 🤖 机器人消息处理：在LLM请求时通常不需要再次处理自己的消息
-            if self._is_bot_message(event):
-                logger.debug("检测到机器人自己的LLM请求，这通常不应该发生")
+            # 只处理群聊消息
+            if event.get_message_type() != MessageType.GROUP_MESSAGE:
                 return
+
+            logger.debug("开始构建简单上下文...")
 
             # 标记当前消息为LLM触发类型
             await self._mark_current_as_llm_triggered(event)
 
-            # 构建结构化上下文
-            context_info = await self._build_structured_context(event, request)
+            # 获取群聊历史
+            group_id = (
+                event.get_group_id()
+                if hasattr(event, "get_group_id")
+                else event.unified_msg_origin
+            )
+            buffer = self._get_group_buffer(group_id)
 
-            if not context_info:
-                logger.debug("没有足够的上下文信息，跳过增强")
+            if not buffer:
+                logger.debug("没有群聊历史，跳过增强")
                 return
 
-            # 构建新的prompt
-            enhanced_prompt = await self._build_enhanced_prompt(
-                context_info, request.prompt
+            # 构建简单上下文
+            enhanced_prompt = await self._build_simple_context(
+                buffer, request.prompt, event
             )
 
-            # 🔧 安全地增强用户prompt，不影响system_prompt和其他插件的修改
             if enhanced_prompt and enhanced_prompt != request.prompt:
-                # 保留原始的用户prompt作为核心内容，将上下文作为辅助信息
-                # 不覆盖system_prompt，确保人设、时间戳等信息不丢失
                 request.prompt = enhanced_prompt
-                logger.debug(f"上下文增强完成，新prompt长度: {len(enhanced_prompt)}")
                 logger.debug(
-                    f"System prompt保持不变，长度: {len(request.system_prompt) if request.system_prompt else 0}"
+                    f"简单上下文增强完成，新prompt长度: {len(enhanced_prompt)}"
                 )
-            else:
-                logger.debug("prompt未发生变化，跳过替换")
 
         except Exception as e:
             logger.error(f"上下文增强时发生错误: {e}")
-            logger.error(traceback.format_exc())
-            # 🔧 出错时不影响正常流程
+            # 出错时不影响正常流程
+
+    async def _build_simple_context(
+        self, buffer: deque, original_prompt: str, event: AstrMessageEvent
+    ) -> str:
+        """构建简单直接的上下文 - 类似SpectreCore的方式"""
+        # 获取用户信息
+        sender_name = (
+            event.message_obj.sender.nickname if event.message_obj.sender else "用户"
+        )
+        sender_id = (
+            event.message_obj.sender.user_id if event.message_obj.sender else "unknown"
+        )
+
+        # 收集最近的聊天记录（普通消息）
+        recent_chats = []
+        bot_replies = []
+
+        messages = list(buffer)[-20:]  # 最近20条消息
+
+        for msg in messages:
+            if msg.message_type == ContextMessageType.NORMAL_CHAT:
+                recent_chats.append(f"{msg.sender_name}: {msg.text_content}")
+            elif msg.message_type == ContextMessageType.BOT_REPLY:
+                bot_replies.append(f"你回复了: {msg.text_content}")
+
+        # 构建简单的上下文
+        context_parts = ["你正在浏览聊天软件，查看群聊消息。"]
+
+        # 添加最近聊天记录
+        if recent_chats:
+            context_parts.append("\n最近的聊天记录:")
+            context_parts.extend(recent_chats[-8:])  # 最近8条
+
+        # 添加你最近的回复
+        if bot_replies:
+            context_parts.append("\n你最近的回复:")
+            context_parts.extend(bot_replies[-3:])  # 最近3条回复
+
+        # 当前情况
+        context_parts.append(
+            f"\n现在 {sender_name}（ID: {sender_id}）发了一个消息: {original_prompt}"
+        )
+        context_parts.append("需要你根据你的设定和当前形势做出最自然的回复。")
+
+        return "\n".join(context_parts)
+
+    # 添加记录机器人回复的功能
+    @filter.on_llm_response(priority=100)
+    async def on_llm_response(self, event: AstrMessageEvent, resp):
+        """记录机器人的回复内容"""
+        try:
+            if event.get_message_type() == MessageType.GROUP_MESSAGE:
+                group_id = (
+                    event.get_group_id()
+                    if hasattr(event, "get_group_id")
+                    else event.unified_msg_origin
+                )
+
+                # 获取回复文本
+                response_text = ""
+                if hasattr(resp, "completion_text"):
+                    response_text = resp.completion_text
+                elif hasattr(resp, "text"):
+                    response_text = resp.text
+                else:
+                    response_text = str(resp)
+
+                # 创建机器人回复记录
+                bot_reply = GroupMessage(event, ContextMessageType.BOT_REPLY)
+                bot_reply.text_content = response_text  # 记录原始回复文本
+                bot_reply.sender_name = "助手"  # 机器人名称
+                bot_reply.sender_id = "bot"
+
+                buffer = self._get_group_buffer(group_id)
+                buffer.append(bot_reply)
+
+                logger.debug(f"记录机器人回复: {response_text[:50]}...")
+
+        except Exception as e:
+            logger.error(f"记录机器人回复时发生错误: {e}")
 
     async def _mark_current_as_llm_triggered(self, event: AstrMessageEvent):
         """将当前消息标记为LLM触发类型"""
@@ -681,17 +727,19 @@ class ContextEnhancerV2(Star):
             logger.debug(f"群聊消息缓存大小: {len(buffer)}")
 
             await self._collect_recent_messages(buffer, context_info)
-            
-            logger.debug(f"收集到的消息数量: 普通={len(context_info['normal_messages'])}, 触发={len(context_info['triggered_messages'])}, 图片={len(context_info['image_messages'])}, 机器人回复={len(context_info['bot_replies'])}")
+
+            logger.debug(
+                f"收集到的消息数量: 普通={len(context_info['normal_messages'])}, 触发={len(context_info['triggered_messages'])}, 图片={len(context_info['image_messages'])}, 机器人回复={len(context_info['bot_replies'])}"
+            )
 
         return context_info
 
     async def _collect_recent_messages(self, buffer: deque, context_info: dict):
         """从缓冲区收集最近的各类消息"""
-        max_triggered = self.config.get("max_triggered_messages", 10)
-        max_normal = self.config.get("max_normal_messages", 15)
-        max_image = self.config.get("max_image_messages", 5)
-        max_bot_replies = self.config.get("max_bot_replies", 8)  # 🤖 机器人回复数量
+        max_triggered = self.config.get("触发消息数量", 8)
+        max_normal = self.config.get("普通消息数量", 12)
+        max_image = self.config.get("图片消息数量", 4)
+        max_bot_replies = self.config.get("机器人回复数量", 5)  # 🤖 机器人回复数量
 
         triggered_count = 0
         normal_count = 0
@@ -752,159 +800,3 @@ class ContextEnhancerV2(Star):
             atmosphere += f"\n最近话题: {'; '.join(recent_topics[-3:])}"
 
         return atmosphere
-
-    async def _build_enhanced_prompt(
-        self, context_info: dict, original_prompt: str
-    ) -> str:
-        """构建增强的prompt - 按照清晰的信息层次结构，使用高级消息格式化"""
-        sections = []
-        bot_reference = self.config.get("bot_self_reference", "你")
-
-        # 第一层：当前群聊状态
-        if context_info.get("atmosphere_summary"):
-            sections.append("=== 当前群聊状态 ===")
-            sections.append(context_info["atmosphere_summary"])
-            sections.append("")
-
-        # 第二层：最近群聊内容（普通背景消息）
-        if context_info.get("normal_messages"):
-            sections.append("=== 最近群聊内容 ===")
-            for msg in context_info["normal_messages"][-10:]:  # 增加普通消息数量
-                # 尝试使用高级格式化
-                try:
-                    if self.message_utils is not None:
-                        formatted_msg = await msg.format_for_display_async(
-                            include_images=True, message_utils=self.message_utils
-                        )
-                        sections.append(formatted_msg)
-                    else:
-                        sections.append(msg.format_for_display())
-                except Exception:
-                    # 降级到简单格式化
-                    sections.append(msg.format_for_display())
-            sections.append("")
-
-        # 第三层：最近和你相关的对话（触发了LLM回复的对话内容）
-        sections.append(f"=== 最近和{bot_reference}相关的对话 ===")
-        sections.append("# 以下是触发了AI回复的重要对话（@提及、唤醒词、主动回复等）")
-
-        # 组织一问一答的形式
-        if context_info.get("triggered_messages") or context_info.get("bot_replies"):
-            # 合并触发消息和机器人回复，按时间排序
-            all_interactions = []
-
-            if context_info.get("triggered_messages"):
-                for msg in context_info["triggered_messages"]:
-                    all_interactions.append(("triggered", msg))
-
-            if context_info.get("bot_replies"):
-                for msg in context_info["bot_replies"]:
-                    all_interactions.append(("bot_reply", msg))
-
-            # 按时间戳排序
-            all_interactions.sort(
-                key=lambda x: x[1].timestamp if hasattr(x[1], "timestamp") else 0
-            )
-
-            # 显示最近的互动
-            for interaction_type, msg in all_interactions[-10:]:
-                try:
-                    if self.message_utils is not None:
-                        formatted_msg = await msg.format_for_display_async(
-                            include_images=True, message_utils=self.message_utils
-                        )
-                        if interaction_type == "triggered":
-                            sections.append(f"👤 {formatted_msg}")
-                        elif interaction_type == "bot_reply":
-                            sections.append(f"🤖 {formatted_msg}")
-                    else:
-                        if interaction_type == "triggered":
-                            sections.append(f"👤 {msg.format_for_display()}")
-                        elif interaction_type == "bot_reply":
-                            sections.append(f"🤖 {msg.format_for_display()}")
-                except Exception:
-                    # 降级到简单格式化
-                    if interaction_type == "triggered":
-                        sections.append(f"👤 {msg.format_for_display()}")
-                    elif interaction_type == "bot_reply":
-                        sections.append(f"🤖 {msg.format_for_display()}")
-
-        if not any(
-            context_info.get(key) for key in ["triggered_messages", "bot_replies"]
-        ):
-            sections.append("（暂无相关对话记录）")
-        sections.append("")
-
-        # 第四层：最近图片信息
-        if context_info.get("image_messages"):
-            sections.append("=== 最近图片 ===")
-            for msg in context_info["image_messages"][-5:]:
-                try:
-                    if self.message_utils is not None:
-                        formatted_msg = await msg.format_for_display_async(
-                            include_images=True, message_utils=self.message_utils
-                        )
-                        sections.append(f"📷 {formatted_msg}")
-                    else:
-                        sections.append(f"📷 {msg.format_for_display()}")
-                except Exception:
-                    sections.append(f"📷 {msg.format_for_display()}")
-            sections.append("")
-
-        # 第五层：当前需要回复的请求（最详细）
-        sections.append(f"=== 当前需要{bot_reference}回复的请求 ===")
-        sections.append(
-            f"📅 详细时间: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-        )
-
-        # 从原始请求中提取更多信息（如果有的话）
-        sections.append(f"💬 请求内容: {original_prompt}")
-
-        # 检查是否有特殊触发标记
-        if "@" in original_prompt:
-            sections.append("🎯 触发方式: @提及")
-
-        sections.append("")
-
-        # 构建最终prompt
-        if not sections:
-            return original_prompt
-
-        # 🚨 最终去重：移除重复的行内容
-        sections = self._remove_duplicate_lines(sections)
-
-        enhanced_context = "\n".join(sections)
-
-        final_prompt = f"""{enhanced_context}请基于以上完整的群聊上下文信息，自然、智能地回复当前请求。注意理解群聊氛围和对话语境，保持对话的连续性和相关性。
-
-当前用户请求: {original_prompt}"""
-
-        return final_prompt
-
-    def _remove_duplicate_lines(self, sections: list) -> list:
-        """移除重复的行内容（最终防重复机制）"""
-        seen_lines = set()
-        deduplicated = []
-
-        for section in sections:
-            lines = section.split("\n")
-            section_lines = []
-
-            for line in lines:
-                line_clean = line.strip()
-                # 跳过空行和标题行
-                if not line_clean or line_clean.startswith("==="):
-                    section_lines.append(line)
-                    continue
-
-                # 对于内容行，检查是否重复
-                content_key = line_clean[:100]  # 取前100字符作为唯一标识
-                if content_key not in seen_lines:
-                    seen_lines.add(content_key)
-                    section_lines.append(line)
-                # 重复的行被跳过
-
-            if section_lines:
-                deduplicated.append("\n".join(section_lines))
-
-        return deduplicated

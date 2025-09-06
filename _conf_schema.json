@@ -1,80 +1,50 @@
 {
-    "max_triggered_messages": {
-        "description": "最近触发LLM对话的消息数量",
-        "type": "int",
-        "hint": "包含@机器人、命令等触发AI回复的消息",
-        "default": 10
-    },
-    "max_normal_messages": {
-        "description": "最近普通群聊消息的数量",
-        "type": "int",
-        "hint": "用于分析群聊氛围和话题的普通消息",
-        "default": 15
-    },
-    "max_image_messages": {
-        "description": "最近包含图片的消息数量",
-        "type": "int",
-        "hint": "包含图片的消息，用于提供视觉上下文",
-        "default": 5
-    },
-    "enable_image_caption": {
-        "description": "是否为图片生成描述文本",
-        "type": "bool",
-        "hint": "开启后会为图片组件生成文字描述",
-        "default": true
-    },
-    "enable_atmosphere_analysis": {
-        "description": "是否分析群聊氛围和话题",
-        "type": "bool",
-        "hint": "开启后会分析群聊的活跃用户和讨论话题",
-        "default": true
-    },
-    "min_normal_messages_for_context": {
-        "description": "至少多少条普通消息才提供群聊上下文",
-        "type": "int",
-        "hint": "避免在消息太少时提供不完整的上下文",
-        "default": 3
-    },
-    "enabled_groups": {
-        "description": "启用插件的群组ID列表",
-        "type": "list",
-        "hint": "空列表表示对所有群生效，否则只对指定群生效",
-        "default": []
-    },
-    "enabled_private": {
-        "description": "是否在私聊中启用插件",
-        "type": "bool",
-        "hint": "开启后私聊也会进行上下文增强",
-        "default": true
-    },
-    "ignore_bot_messages": {
-        "description": "是否忽略机器人自己的消息",
-        "type": "bool",
-        "hint": "关闭此选项可收集机器人回复，补充数据库记录的不足，保持上下文完整性",
-        "default": false
-    },
-    "collect_bot_replies": {
-        "description": "是否收集机器人回复",
-        "type": "bool",
-        "hint": "开启后会收集机器人的回复消息，补充聊天历史数据库可能缺失的内容",
-        "default": true
-    },
-    "max_bot_replies": {
-        "description": "收集的机器人回复数量",
-        "type": "int",
-        "hint": "最多收集多少条机器人回复消息",
-        "default": 8
-    },
-    "bot_self_reference": {
-        "description": "机器人自称",
-        "type": "string",
-        "hint": "机器人在上下文中如何称呼自己，支持角色扮演（如'我'、'小助手'、'猫娘'等）",
-        "default": "你"
-    },
-    "safe_mode": {
-        "description": "安全模式",
-        "type": "bool",
-        "hint": "开启后插件出错时不会影响其他插件的正常运行",
-        "default": true
-    }
+  "启用群组": {
+    "description": "启用插件的群组ID列表",
+    "type": "list",
+    "hint": "空列表表示对所有群生效，否则只对指定群生效",
+    "default": []
+  },
+  "普通消息数量": {
+    "description": "最近普通群聊消息的数量",
+    "type": "int",
+    "hint": "用于构建上下文的普通群聊消息数量",
+    "default": 12
+  },
+  "触发消息数量": {
+    "description": "最近触发LLM对话的消息数量",
+    "type": "int",
+    "hint": "包含@机器人、命令等触发AI回复的消息",
+    "default": 8
+  },
+  "图片消息数量": {
+    "description": "最近包含图片的消息数量",
+    "type": "int",
+    "hint": "包含图片的消息，用于提供视觉上下文",
+    "default": 4
+  },
+  "启用图片描述": {
+    "description": "是否为图片生成描述文本",
+    "type": "bool",
+    "hint": "开启后会为图片组件生成文字描述（需要高级功能支持）",
+    "default": true
+  },
+  "处理@信息": {
+    "description": "是否处理@用户的信息",
+    "type": "bool",
+    "hint": "开启后会在上下文中标注@信息",
+    "default": true
+  },
+  "收集机器人回复": {
+    "description": "是否收集机器人回复",
+    "type": "bool",
+    "hint": "开启后会收集机器人的回复消息，构建完整对话上下文",
+    "default": true
+  },
+  "机器人回复数量": {
+    "description": "收集的机器人回复数量",
+    "type": "int",
+    "hint": "最多收集多少条机器人回复消息",
+    "default": 5
+  }
 }
