@@ -1,6 +1,9 @@
-from astrbot.api.all import *
-from astrbot.api.event import filter
+from astrbot.api.event import filter, AstrMessageEvent
+from astrbot.api.star import Context, Star, register
+from astrbot.api import logger
 from astrbot.api.provider import ProviderRequest
+from astrbot.api.message_components import Plain, At, Image
+from astrbot.api.platform import MessageType
 import traceback
 import json
 import datetime
@@ -451,7 +454,8 @@ class ContextEnhancerV2(Star):
             try:
                 history_raw = json.loads(request.conversation.history)
                 context_info["conversation_history"] = history_raw
-            except Exception:
+            except (json.JSONDecodeError, TypeError) as e:
+                logger.debug(f"解析对话历史失败: {e}")
                 pass
 
         # 获取群聊消息缓存
@@ -635,4 +639,3 @@ class ContextEnhancerV2(Star):
 当前用户请求: {original_prompt}"""
 
         return final_prompt
-

@@ -1,8 +1,19 @@
-
 from datetime import datetime
-from typing import List, Optional
+from typing import List
 
-from astrbot.api.all import *
+from astrbot.api import AstrBotConfig, logger
+from astrbot.api.star import Context
+from astrbot.api.message_components import (
+    Plain,
+    At,
+    AtAll,
+    Image,
+    Face,
+    Reply,
+    Record,
+    Video,
+    BaseMessageComponent,
+)
 
 from .image_caption import ImageCaptionUtils
 
@@ -11,15 +22,15 @@ class MessageUtils:
     """
     消息处理工具类
     """
-    config: Optional[AstrBotConfig] = None
 
-    @staticmethod
-    def init(config: AstrBotConfig):
-        MessageUtils.config = config
+    def __init__(self, config: AstrBotConfig, context: Context):
+        """初始化消息处理工具类"""
+        self.config = config
+        self.context = context
+        self.image_caption_utils = ImageCaptionUtils(context, config)
 
-    @staticmethod
     async def format_history_for_llm(
-        history_messages: List[AstrBotMessage], max_messages: int = 20
+        self, history_messages: List, max_messages: int = 20
     ) -> str:
         """
         将历史消息列表格式化为适合输入给大模型的文本格式
@@ -55,12 +66,13 @@ class MessageUtils:
                 try:
                     time_obj = datetime.fromtimestamp(msg.timestamp)
                     send_time = time_obj.strftime("%Y-%m-%d %H:%M:%S")
-                except:
+                except (OSError, ValueError, OverflowError) as e:
+                    logger.debug(f"时间戳转换失败: {e}")
                     pass
 
             # 获取消息内容 (异步调用)
             message_content = (
-                await MessageUtils.outline_message_list(msg.message)
+                await self.outline_message_list(msg.message)
                 if hasattr(msg, "message") and msg.message
                 else ""
             )
@@ -79,8 +91,8 @@ class MessageUtils:
 
         return formatted_text
 
-    @staticmethod
     async def outline_message_list(
+        self,
         message_list: List[BaseMessageComponent],
     ) -> str:
         """
@@ -105,15 +117,18 @@ class MessageUtils:
                 try:
                     image = i.file if i.file else i.url
                     if image:
-                        caption = await ImageCaptionUtils.generate_image_caption(image)
+                        caption = await self.image_caption_utils.generate_image_caption(
+                            image
+                        )
                         if caption:
                             outline += f"[图片: {caption}]"
                         else:
-                            outline += f"[图片]"
+                            outline += "[图片]"
                     else:
-                        outline += f"[图片]"
+                        outline += "[图片]"
                 except Exception as e:
                     logger.error(f"处理图片消息失败: {e}")
+                    outline += "[图片]"
                     outline += "[图片]"
             elif isinstance(i, Face):
                 outline += f"[表情:{i.id}]"
@@ -129,7 +144,7 @@ class MessageUtils:
                         else f"{i.sender_id}"
                     )
                     # 异步调用
-                    reply_content = await MessageUtils.outline_message_list(i.chain)
+                    reply_content = await self.outline_message_list(i.chain)
                     outline += f"[回复({sender_info}: {reply_content})]"
                 elif i.message_str:
                     sender_info = (

@@ -1,8 +1,8 @@
-
 import asyncio
 from typing import Optional
 
-from astrbot.api.all import *
+from astrbot.api.star import Context
+from astrbot.api import AstrBotConfig, logger
 
 
 class ImageCaptionUtils:
@@ -11,20 +11,24 @@ class ImageCaptionUtils:
     用于调用大语言模型将图片转述为文本描述
     """
 
-    # 保存context和config对象的静态变量
-    context: Optional[Context] = None
-    config: Optional[AstrBotConfig] = None
-    # 图片描述缓存
-    caption_cache = {}
+    def __init__(self, context: Context, config: AstrBotConfig):
+        """初始化图片转述工具类"""
+        self.context = context
+        self.config = config
+        # 使用有界缓存避免内存泄漏
+        self._caption_cache = {}
+        self._max_cache_size = 100  # 最大缓存条目数
 
-    @staticmethod
-    def init(context: Context, config: AstrBotConfig):
-        """初始化图片转述工具类，保存context和config引用"""
-        ImageCaptionUtils.context = context
-        ImageCaptionUtils.config = config
+    def _manage_cache(self, key: str, value: str):
+        """管理缓存大小，使用简单的LRU策略"""
+        if len(self._caption_cache) >= self._max_cache_size:
+            # 删除最老的缓存项
+            oldest_key = next(iter(self._caption_cache))
+            del self._caption_cache[oldest_key]
+        self._caption_cache[key] = value
 
-    @staticmethod
     async def generate_image_caption(
+        self,
         image: str,  # 图片的base64编码或URL
         timeout: int = 30,
     ) -> Optional[str]:
@@ -39,29 +43,26 @@ class ImageCaptionUtils:
             生成的图片描述文本，如果失败则返回None
         """
         # 检查缓存
-        if image in ImageCaptionUtils.caption_cache:
+        if image in self._caption_cache:
             logger.debug(f"命中图片描述缓存: {image[:50]}...")
-            return ImageCaptionUtils.caption_cache[image]
+            return self._caption_cache[image]
 
         # 获取配置
-        config = ImageCaptionUtils.config
-        context = ImageCaptionUtils.context
-        
-        if not config or not context:
+        if not self.config or not self.context:
             logger.warning("ImageCaptionUtils 未正确初始化")
             return None
-            
+
         # 检查是否已启用图片转述
-        image_processing_config = config.get("image_processing", {})
+        image_processing_config = self.config.get("image_processing", {})
         if not image_processing_config.get("use_image_caption", False):
             return None
 
         provider_id = image_processing_config.get("image_caption_provider_id", "")
         # 获取提供商
         if provider_id == "":
-            provider = context.get_using_provider()
+            provider = self.context.get_using_provider()
         else:
-            provider = context.get_provider_by_id(provider_id)
+            provider = self.context.get_provider_by_id(provider_id)
 
         if not provider:
             logger.warning(f"无法找到提供商: {provider_id if provider_id else '默认'}")
@@ -85,7 +86,7 @@ class ImageCaptionUtils:
 
             # 缓存结果
             if caption:
-                ImageCaptionUtils.caption_cache[image] = caption
+                self._manage_cache(image, caption)
                 logger.debug(f"缓存图片描述: {image[:50]}... -> {caption}")
 
             return caption
