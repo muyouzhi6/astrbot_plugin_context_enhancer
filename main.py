@@ -62,7 +62,7 @@ class GroupMessage:
         return result
 
 @register(
-    "context_enhancer_v2",
+    "astrbot_plugin_context_enhancer",
     "木有知", 
     "智能群聊上下文增强插件v2.0，提供强大的'读空气'功能。通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境，支持角色扮演，完全兼容人设系统。",
     "2.0.0"
@@ -533,3 +533,4 @@ class ContextEnhancerV2(Star):
 当前用户请求: {original_prompt}"""
 
         return final_prompt
+
