@@ -20,9 +20,9 @@ class ImageCaptionUtils:
         self._max_cache_size = 100  # 最大缓存条目数
 
     def _manage_cache(self, key: str, value: str):
-        """管理缓存大小，使用简单的LRU策略"""
+        """管理缓存大小，使用简单的FIFO（先进先出）策略"""
         if len(self._caption_cache) >= self._max_cache_size:
-            # 删除最老的缓存项
+            # 删除最早加入的缓存项
             oldest_key = next(iter(self._caption_cache))
             del self._caption_cache[oldest_key]
         self._caption_cache[key] = value

@@ -214,9 +214,9 @@ class ContextEnhancerV2(Star):
             # 创建消息对象
             group_msg = GroupMessage(event, message_type)
 
-            # 处理图片描述
+            # 生成图片占位符
             if group_msg.has_image and self.config.get("enable_image_caption", True):
-                await self._process_image_captions(group_msg)
+                await self._generate_image_placeholders(group_msg)
 
             # 添加到缓冲区
             buffer = self._get_group_buffer(group_msg.group_id)
@@ -247,9 +247,8 @@ class ContextEnhancerV2(Star):
             if any(
                 keyword in sender_name for keyword in ["bot", "机器人", "助手", "ai"]
             ):
-                # 进一步验证：检查是否真的是当前机器人
-                if bot_id and sender_id and str(sender_id) == str(bot_id):
-                    return True
+                # 这个额外检查只是模糊匹配，不能确定是否是当前机器人
+                logger.debug(f"检测到疑似机器人消息，发送者名称: {sender_name}")
 
             return False
         except Exception as e:
@@ -348,15 +347,15 @@ class ContextEnhancerV2(Star):
 
         return any(keyword in message_text for keyword in trigger_keywords)
 
-    async def _process_image_captions(self, group_msg: GroupMessage):
-        """处理图片描述（简化版）"""
+    async def _generate_image_placeholders(self, group_msg: GroupMessage):
+        """为图片生成简单的占位符"""
         try:
             # 这里可以集成图片描述功能
             # 暂时使用简单的占位符
             for i, img in enumerate(group_msg.images):
                 group_msg.image_captions.append(f"图片{i + 1}")
         except Exception as e:
-            logger.warning(f"处理图片描述时发生错误: {e}")
+            logger.warning(f"生成图片占位符时发生错误: {e}")
 
     @filter.on_llm_request(priority=100)  # 🔧 使用较低优先级，避免干扰其他插件
     async def on_llm_request(self, event: AstrMessageEvent, request: ProviderRequest):
@@ -427,13 +426,23 @@ class ContextEnhancerV2(Star):
             )
             buffer = self._get_group_buffer(group_id)
 
-            # 查找最近的匹配消息并更新类型
+            # 使用更健壮的匹配逻辑：发送者ID + 时间窗口
+            current_time = datetime.datetime.now()
+            sender_id = (
+                event.message_obj.sender.user_id if event.message_obj.sender else None
+            )
+
+            # 查找最近3秒内的匹配消息
             for msg in reversed(buffer):
+                time_diff = (current_time - msg.timestamp).total_seconds()
                 if (
-                    msg.sender_id == event.message_obj.sender.user_id
-                    and msg.text_content == event.message_str
+                    time_diff <= 3  # 3秒时间窗口
+                    and msg.sender_id == sender_id
+                    and msg.message_type
+                    != ContextMessageType.LLM_TRIGGERED  # 避免重复标记
                 ):
                     msg.message_type = ContextMessageType.LLM_TRIGGERED
+                    logger.debug(f"标记消息为LLM触发: {msg.text_content[:50]}...")
                     break
 
     async def _build_structured_context(

@@ -94,6 +94,8 @@ class MessageUtils:
     async def outline_message_list(
         self,
         message_list: List[BaseMessageComponent],
+        max_depth: int = 3,
+        current_depth: int = 0,
     ) -> str:
         """
         获取消息概要。
@@ -105,10 +107,16 @@ class MessageUtils:
 
         Args:
             message_list: 消息段列表
+            max_depth: 最大递归深度，防止无限递归
+            current_depth: 当前递归深度
 
         Returns:
             消息概要文本
         """
+        # 防止无限递归
+        if current_depth >= max_depth:
+            return "[回复内容过深]"
+
         outline = ""
         for i in message_list:
             if isinstance(i, Plain):
@@ -129,7 +137,6 @@ class MessageUtils:
                 except Exception as e:
                     logger.error(f"处理图片消息失败: {e}")
                     outline += "[图片]"
-                    outline += "[图片]"
             elif isinstance(i, Face):
                 outline += f"[表情:{i.id}]"
             elif isinstance(i, At):
@@ -143,8 +150,10 @@ class MessageUtils:
                         if i.sender_nickname
                         else f"{i.sender_id}"
                     )
-                    # 异步调用
-                    reply_content = await self.outline_message_list(i.chain)
+                    # 异步调用，传递递归深度
+                    reply_content = await self.outline_message_list(
+                        i.chain, max_depth, current_depth + 1
+                    )
                     outline += f"[回复({sender_info}: {reply_content})]"
                 elif i.message_str:
                     sender_info = (
