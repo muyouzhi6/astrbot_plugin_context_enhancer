@@ -1,50 +1,62 @@
 {
-  "启用群组": {
-    "description": "启用插件的群组ID列表",
-    "type": "list",
-    "hint": "空列表表示对所有群生效，否则只对指定群生效",
-    "default": []
-  },
-  "普通消息数量": {
-    "description": "最近普通群聊消息的数量",
-    "type": "int",
-    "hint": "用于构建上下文的普通群聊消息数量",
-    "default": 12
-  },
-  "触发消息数量": {
-    "description": "最近触发LLM对话的消息数量",
-    "type": "int",
-    "hint": "包含@机器人、命令等触发AI回复的消息",
-    "default": 8
-  },
-  "图片消息数量": {
-    "description": "最近包含图片的消息数量",
-    "type": "int",
-    "hint": "包含图片的消息，用于提供视觉上下文",
-    "default": 4
-  },
-  "启用图片描述": {
-    "description": "是否为图片生成描述文本",
-    "type": "bool",
-    "hint": "开启后会为图片组件生成文字描述（需要高级功能支持）",
-    "default": true
-  },
-  "处理@信息": {
-    "description": "是否处理@用户的信息",
-    "type": "bool",
-    "hint": "开启后会在上下文中标注@信息",
-    "default": true
-  },
-  "收集机器人回复": {
-    "description": "是否收集机器人回复",
-    "type": "bool",
-    "hint": "开启后会收集机器人的回复消息，构建完整对话上下文",
-    "default": true
-  },
-  "机器人回复数量": {
-    "description": "收集的机器人回复数量",
-    "type": "int",
-    "hint": "最多收集多少条机器人回复消息",
-    "default": 5
-  }
+    "启用群组": {
+        "description": "启用插件的群组ID列表",
+        "type": "list",
+        "hint": "空列表表示对所有群生效，否则只对指定群生效",
+        "default": []
+    },
+    "普通消息数量": {
+        "description": "最近普通群聊消息的数量",
+        "type": "int",
+        "hint": "用于构建上下文的普通群聊消息数量",
+        "default": 12
+    },
+    "触发消息数量": {
+        "description": "最近触发LLM对话的消息数量",
+        "type": "int",
+        "hint": "包含@机器人、命令等触发AI回复的消息",
+        "default": 8
+    },
+    "图片消息数量": {
+        "description": "最近包含图片的消息数量",
+        "type": "int",
+        "hint": "包含图片的消息，用于提供视觉上下文",
+        "default": 4
+    },
+    "启用图片描述": {
+        "description": "是否为图片生成描述文本",
+        "type": "bool",
+        "hint": "开启后会为图片组件生成文字描述（需要高级功能支持）",
+        "default": true
+    },
+    "图片描述提供商ID": {
+        "description": "图片描述专用的LLM提供商ID",
+        "type": "string",
+        "hint": "可选，专门用于图片描述的LLM提供商ID，如为空则使用当前选择的主提供商（建议使用支持图像模态的模型如GPT-4V、Claude-3等）",
+        "default": ""
+    },
+    "图片描述提示词": {
+        "description": "图片描述的提示词模板",
+        "type": "string",
+        "hint": "用于生成图片描述的提示词，可根据需求调整描述的详细程度",
+        "default": "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息"
+    },
+    "处理@信息": {
+        "description": "是否处理@用户的信息",
+        "type": "bool",
+        "hint": "开启后会在上下文中标注@信息",
+        "default": true
+    },
+    "收集机器人回复": {
+        "description": "是否收集机器人回复",
+        "type": "bool",
+        "hint": "开启后会收集机器人的回复消息，构建完整对话上下文",
+        "default": true
+    },
+    "机器人回复数量": {
+        "description": "收集的机器人回复数量",
+        "type": "int",
+        "hint": "最多收集多少条机器人回复消息",
+        "default": 5
+    }
 }
