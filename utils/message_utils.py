@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import List
+import asyncio
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.star import Context
@@ -118,24 +119,24 @@ class MessageUtils:
             return "[回复内容过深]"
 
         outline = ""
-        for i in message_list:
+
+        # 收集所有图片以便并发处理
+        image_tasks = []
+        image_indices = []
+
+        for idx, i in enumerate(message_list):
             if isinstance(i, Plain):
                 outline += i.text
             elif isinstance(i, Image):
-                try:
-                    image = i.file if i.file else i.url
-                    if image:
-                        caption = await self.image_caption_utils.generate_image_caption(
-                            image
-                        )
-                        if caption:
-                            outline += f"[图片: {caption}]"
-                        else:
-                            outline += "[图片]"
-                    else:
-                        outline += "[图片]"
-                except Exception as e:
-                    logger.error(f"处理图片消息失败: {e}")
+                # 收集图片任务，稍后并发处理
+                image = i.file if i.file else i.url
+                if image:
+                    image_tasks.append(
+                        self.image_caption_utils.generate_image_caption(image)
+                    )
+                    image_indices.append(idx)
+                    outline += f"[图片_PLACEHOLDER_{len(image_tasks) - 1}]"
+                else:
                     outline += "[图片]"
             elif isinstance(i, Face):
                 outline += f"[表情:{i.id}]"
@@ -176,4 +177,33 @@ class MessageUtils:
                     outline += f"[{i.type}]"
                 else:
                     outline += f"[{type(i).__name__}]"
+
+        # 并发处理所有图片描述任务
+        if image_tasks:
+            try:
+                # 使用asyncio.gather并发执行所有图片描述任务
+                image_captions = await asyncio.gather(
+                    *image_tasks, return_exceptions=True
+                )
+
+                # 替换占位符
+                for i, caption in enumerate(image_captions):
+                    placeholder = f"[图片_PLACEHOLDER_{i}]"
+                    if isinstance(caption, Exception):
+                        # 如果某个图片处理失败，使用默认占位符
+                        logger.debug(f"图片描述生成失败: {caption}")
+                        replacement = "[图片]"
+                    elif caption:
+                        replacement = f"[图片: {caption}]"
+                    else:
+                        replacement = "[图片]"
+
+                    outline = outline.replace(placeholder, replacement)
+            except Exception as e:
+                # 如果并发处理完全失败，清理所有占位符
+                logger.error(f"图片并发处理失败: {e}")
+                for i in range(len(image_tasks)):
+                    placeholder = f"[图片_PLACEHOLDER_{i}]"
+                    outline = outline.replace(placeholder, "[图片]")
+
         return outline

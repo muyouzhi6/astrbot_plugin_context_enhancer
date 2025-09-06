@@ -20,6 +20,37 @@ class ContextMessageType:
     BOT_REPLY = "bot_reply"  # 🤖 机器人自己的回复（补充数据库记录不足）
 
 
+# 常量定义 - 避免硬编码
+class ContextConstants:
+    # 时间相关常量
+    MESSAGE_MATCH_TIME_WINDOW = 3  # 消息匹配时间窗口（秒）
+    INACTIVE_GROUP_CLEANUP_DAYS = 7  # 不活跃群组清理天数
+
+    # 消息长度判断
+    MIN_MESSAGE_LENGTH_FOR_TRIGGER = 10  # 触发词检测的最小消息长度
+
+    # 命令前缀
+    COMMAND_PREFIXES = ["/", "!", "！", "#", ".", "。"]
+
+    # 触发关键词
+    TRIGGER_KEYWORDS = [
+        "bot",
+        "机器人",
+        "ai",
+        "助手",
+        "help",
+        "帮助",
+        "查询",
+        "搜索",
+        "翻译",
+        "计算",
+        "问答",
+    ]
+
+    # 机器人识别关键词
+    BOT_KEYWORDS = ["bot", "机器人", "助手", "ai"]
+
+
 class GroupMessage:
     """群聊消息包装类"""
 
@@ -117,6 +148,7 @@ class ContextEnhancerV2(Star):
 
         # 群聊消息缓存 - 每个群独立存储
         self.group_messages = {}  # group_id -> deque of GroupMessage
+        self.group_last_activity = {}  # group_id -> last_activity_time (用于清理不活跃群组)
 
         # 显示当前配置
         logger.info(
@@ -163,7 +195,16 @@ class ContextEnhancerV2(Star):
         }
 
     def _get_group_buffer(self, group_id: str) -> deque:
-        """获取群聊的消息缓冲区"""
+        """获取群聊的消息缓冲区，并管理内存"""
+        current_time = datetime.datetime.now()
+
+        # 更新活动时间
+        self.group_last_activity[group_id] = current_time
+
+        # 定期清理不活跃的群组缓存（每100次调用检查一次）
+        if len(self.group_messages) % 100 == 0:
+            self._cleanup_inactive_groups(current_time)
+
         if group_id not in self.group_messages:
             max_total = (
                 self.config.get("max_triggered_messages", 10)
@@ -172,6 +213,25 @@ class ContextEnhancerV2(Star):
             ) * 2  # 预留空间
             self.group_messages[group_id] = deque(maxlen=max_total)
         return self.group_messages[group_id]
+
+    def _cleanup_inactive_groups(self, current_time: datetime.datetime):
+        """清理超过配置天数未活跃的群组缓存"""
+        inactive_threshold = datetime.timedelta(
+            days=ContextConstants.INACTIVE_GROUP_CLEANUP_DAYS
+        )
+        inactive_groups = []
+
+        for group_id, last_activity in self.group_last_activity.items():
+            if current_time - last_activity > inactive_threshold:
+                inactive_groups.append(group_id)
+
+        for group_id in inactive_groups:
+            if group_id in self.group_messages:
+                del self.group_messages[group_id]
+            del self.group_last_activity[group_id]
+
+        if inactive_groups:
+            logger.debug(f"清理了 {len(inactive_groups)} 个不活跃群组的缓存")
 
     def is_chat_enabled(self, event: AstrMessageEvent) -> bool:
         """检查当前聊天是否启用增强功能"""
@@ -216,7 +276,7 @@ class ContextEnhancerV2(Star):
 
             # 生成图片占位符
             if group_msg.has_image and self.config.get("enable_image_caption", True):
-                await self._generate_image_placeholders(group_msg)
+                self._generate_image_placeholders(group_msg)
 
             # 添加到缓冲区
             buffer = self._get_group_buffer(group_msg.group_id)
@@ -244,9 +304,7 @@ class ContextEnhancerV2(Star):
             sender_name = (
                 event.get_sender_name().lower() if event.get_sender_name() else ""
             )
-            if any(
-                keyword in sender_name for keyword in ["bot", "机器人", "助手", "ai"]
-            ):
+            if any(keyword in sender_name for keyword in ContextConstants.BOT_KEYWORDS):
                 # 这个额外检查只是模糊匹配，不能确定是否是当前机器人
                 logger.debug(f"检测到疑似机器人消息，发送者名称: {sender_name}")
 
@@ -310,9 +368,11 @@ class ContextEnhancerV2(Star):
             return False
 
         message_text = event.message_str.lower().strip()
-        command_prefixes = ["/", "!", "！", "#", ".", "。"]
 
-        return any(message_text.startswith(prefix) for prefix in command_prefixes)
+        return any(
+            message_text.startswith(prefix)
+            for prefix in ContextConstants.COMMAND_PREFIXES
+        )
 
     def _is_wake_message(self, event: AstrMessageEvent) -> bool:
         """检查是否是唤醒状态的消息"""
@@ -328,26 +388,14 @@ class ContextEnhancerV2(Star):
         message_text = event.message_str.lower()
 
         # 避免误判短消息
-        if len(message_text) <= 10:
+        if len(message_text) <= ContextConstants.MIN_MESSAGE_LENGTH_FOR_TRIGGER:
             return False
 
-        trigger_keywords = [
-            "bot",
-            "机器人",
-            "ai",
-            "助手",
-            "help",
-            "帮助",
-            "查询",
-            "搜索",
-            "翻译",
-            "计算",
-            "问答",
-        ]
+        return any(
+            keyword in message_text for keyword in ContextConstants.TRIGGER_KEYWORDS
+        )
 
-        return any(keyword in message_text for keyword in trigger_keywords)
-
-    async def _generate_image_placeholders(self, group_msg: GroupMessage):
+    def _generate_image_placeholders(self, group_msg: GroupMessage):
         """为图片生成简单的占位符"""
         try:
             # 这里可以集成图片描述功能
@@ -432,11 +480,11 @@ class ContextEnhancerV2(Star):
                 event.message_obj.sender.user_id if event.message_obj.sender else None
             )
 
-            # 查找最近3秒内的匹配消息
+            # 查找最近指定时间窗口内的匹配消息
             for msg in reversed(buffer):
                 time_diff = (current_time - msg.timestamp).total_seconds()
                 if (
-                    time_diff <= 3  # 3秒时间窗口
+                    time_diff <= ContextConstants.MESSAGE_MATCH_TIME_WINDOW
                     and msg.sender_id == sender_id
                     and msg.message_type
                     != ContextMessageType.LLM_TRIGGERED  # 避免重复标记

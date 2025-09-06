@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 from typing import Optional
 
 from astrbot.api.star import Context
@@ -27,6 +28,16 @@ class ImageCaptionUtils:
             del self._caption_cache[oldest_key]
         self._caption_cache[key] = value
 
+    def _generate_cache_key(self, image: str) -> str:
+        """生成内存效率高的缓存键，使用SHA256哈希值"""
+        try:
+            # 对图片内容生成SHA256哈希值，减少内存占用
+            return hashlib.sha256(image.encode("utf-8")).hexdigest()
+        except Exception as e:
+            # 如果哈希生成失败，使用截断的原始值作为备选
+            logger.debug(f"生成缓存键失败: {e}")
+            return image[:64] if len(image) > 64 else image
+
     async def generate_image_caption(
         self,
         image: str,  # 图片的base64编码或URL
@@ -42,10 +53,13 @@ class ImageCaptionUtils:
         Returns:
             生成的图片描述文本，如果失败则返回None
         """
+        # 生成内存效率高的缓存键
+        cache_key = self._generate_cache_key(image)
+
         # 检查缓存
-        if image in self._caption_cache:
+        if cache_key in self._caption_cache:
             logger.debug(f"命中图片描述缓存: {image[:50]}...")
-            return self._caption_cache[image]
+            return self._caption_cache[cache_key]
 
         # 获取配置
         if not self.config or not self.context:
@@ -69,25 +83,24 @@ class ImageCaptionUtils:
             return None
 
         try:
-            # 带超时控制的调用大模型进行图片转述
-            async def call_llm():
-                return await provider.text_chat(
+            # 使用asyncio.wait_for添加超时控制
+            llm_response = await asyncio.wait_for(
+                provider.text_chat(
                     prompt=image_processing_config.get(
                         "image_caption_prompt", "请直接简短描述这张图片"
                     ),
                     contexts=[],
                     image_urls=[image],  # 图片链接，支持路径和网络链接
                     system_prompt="",  # 系统提示，可以不传
-                )
-
-            # 使用asyncio.wait_for添加超时控制
-            llm_response = await asyncio.wait_for(call_llm(), timeout=timeout)
+                ),
+                timeout=timeout,
+            )
             caption = llm_response.completion_text
 
             # 缓存结果
             if caption:
-                self._manage_cache(image, caption)
-                logger.debug(f"缓存图片描述: {image[:50]}... -> {caption}")
+                self._manage_cache(cache_key, caption)
+                logger.debug(f"缓存图片描述: hash({cache_key[:8]}...) -> {caption}")
 
             return caption
         except asyncio.TimeoutError:
