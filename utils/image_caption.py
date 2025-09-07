@@ -67,6 +67,17 @@ class ImageCaptionUtils:
         # 3. 如果仍然失败，使用默认提供商
         return self.context.get_using_provider()
 
+    def _get_image_mime_type(self, image_bytes: bytes) -> str:
+        """通过检查文件的魔术数字来检测常见的MIME类型"""
+        if image_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+            return 'image/png'
+        elif image_bytes.startswith(b'GIF87a') or image_bytes.startswith(b'GIF89a'):
+            return 'image/gif'
+        elif image_bytes.startswith(b'\xff\xd8\xff'):
+            return 'image/jpeg'
+        # 如果无法识别，则默认为 jpeg
+        return 'image/jpeg'
+
     async def generate_image_caption(
         self,
         image: Union[str, bytes],  # 图片的base64编码或URL
@@ -118,7 +129,11 @@ class ImageCaptionUtils:
                 "image_caption_prompt", "请直接简短描述这张图片"
             )
 
-        image_url: str = image if isinstance(image, str) else f"data:image/jpeg;base64,{base64.b64encode(image).decode()}"
+        if isinstance(image, str):
+            image_url = image
+        else:
+            mime_type = self._get_image_mime_type(image)
+            image_url = f"data:{mime_type};base64,{base64.b64encode(image).decode()}"
 
         try:
             # 使用asyncio.wait_for添加超时控制

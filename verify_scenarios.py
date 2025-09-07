@@ -41,7 +41,7 @@ class MockEvent(MagicMock):
 # --- 测试用例 ---
 
 @patch('astrabot.api', MagicMock())
-class TestContextEnhancerScenarios(unittest.TestCase):
+class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         """在每个测试前运行"""
         print(f"\n--- Running test: {self._testMethodName} ---")

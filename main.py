@@ -9,8 +9,6 @@ import json
 import datetime
 from collections import deque
 import os
-import shutil
-import pickle
 from typing import Dict, Any, Optional
 import time
 
@@ -63,8 +61,10 @@ class GroupMessage:
     def __init__(self, event: Optional[AstrMessageEvent], message_type: str):
         self.message_type = message_type
         self.timestamp = datetime.datetime.now()
+        self.id = None
         
         if event and event.message_obj:
+            self.id = getattr(event, 'id', None) or getattr(event.message_obj, 'id', None)
             self.sender_name = event.message_obj.sender.nickname if event.message_obj.sender else "用户"
             self.sender_id = event.message_obj.sender.user_id if event.message_obj.sender else "unknown"
             self.group_id = event.get_group_id() if hasattr(event, "get_group_id") else event.unified_msg_origin
@@ -84,6 +84,7 @@ class GroupMessage:
     def to_dict(self) -> dict:
         """将消息对象转换为可序列化为 JSON 的字典"""
         return {
+            "id": self.id,
             "message_type": self.message_type,
             "timestamp": self.timestamp.isoformat(),
             "sender_name": self.sender_name,
@@ -109,6 +110,7 @@ class GroupMessage:
         instance = cls(event, data["message_type"])
 
         # 恢复属性
+        instance.id = data.get("id")
         instance.timestamp = datetime.datetime.fromisoformat(data["timestamp"])
         instance.sender_name = data.get("sender_name", "用户")
         instance.sender_id = data.get("sender_id", "unknown")
@@ -759,35 +761,40 @@ class ContextEnhancerV2(Star):
     @filter.command("reset", "new", description="清空上下文缓存")
     async def on_command(self, event: AstrMessageEvent):
         """处理 reset 和 new 命令，清空上下文缓存"""
-        command = getattr(event, 'command', None)
-        logger.info(f"收到命令 '{command}'，开始清空上下文缓存。")
+        logger.info(f"收到清空上下文命令，开始执行...")
         self.clear_context_cache()
 
     async def _mark_current_as_llm_triggered(self, event: AstrMessageEvent):
-        """将当前消息标记为LLM触发类型"""
-        if event.get_message_type() == MessageType.GROUP_MESSAGE:
-            group_id = (
-                event.get_group_id()
-                if hasattr(event, "get_group_id")
-                else event.unified_msg_origin
-            )
-            buffer = self._get_group_buffer(group_id)
+        """将当前消息标记为LLM触发类型（增强版）"""
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            return
 
-            # 使用更健壮的匹配逻辑：发送者ID + 时间窗口
-            current_time = datetime.datetime.now()
-            sender_id = (
-                event.message_obj.sender.user_id if event.message_obj.sender else None
-            )
-
-            # 查找最近指定时间窗口内的匹配消息
+        group_id = event.get_group_id() or event.unified_msg_origin
+        buffer = self._get_group_buffer(group_id)
+        
+        # 优先使用消息ID进行精确匹配
+        msg_id = getattr(event, 'id', None) or getattr(event.message_obj, 'id', None)
+        if msg_id:
             for msg in reversed(buffer):
-                time_diff = (current_time - msg.timestamp).total_seconds()
-                if (
-                    time_diff <= ContextConstants.MESSAGE_MATCH_TIME_WINDOW
-                    and msg.sender_id == sender_id
-                    and msg.message_type
-                    != ContextMessageType.LLM_TRIGGERED  # 避免重复标记
-                ):
+                # 假设 GroupMessage 保存了原始 event 的 id
+                if getattr(msg, 'id', None) == msg_id:
                     msg.message_type = ContextMessageType.LLM_TRIGGERED
-                    logger.debug(f"标记消息为LLM触发: {msg.text_content[:50]}...")
-                    break
+                    logger.debug(f"通过消息ID标记为LLM触发: {msg.text_content[:50]}...")
+                    return
+
+        # 如果没有消息ID，回退到基于内容和发送者的模糊匹配
+        sender_id = event.get_sender_id()
+        text_content = event.get_message_str()
+        current_time = datetime.datetime.now()
+
+        for msg in reversed(buffer):
+            time_diff = (current_time - msg.timestamp).total_seconds()
+            if (
+                time_diff <= ContextConstants.MESSAGE_MATCH_TIME_WINDOW and
+                msg.sender_id == sender_id and
+                msg.text_content == text_content and
+                msg.message_type != ContextMessageType.LLM_TRIGGERED
+            ):
+                msg.message_type = ContextMessageType.LLM_TRIGGERED
+                logger.debug(f"通过内容匹配标记为LLM触发: {msg.text_content[:50]}...")
+                return

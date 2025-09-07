@@ -66,7 +66,7 @@ class MockProviderRequest:
 from main import ContextEnhancerV2, GroupMessage, ContextMessageType
 
 @patch('astrabot.api', MagicMock())
-class TestImagePassing(unittest.TestCase):
+class TestImagePassing(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         # 创建 mock 对象
         self.mock_context = MagicMock()
