@@ -24,11 +24,11 @@ class MessageUtils:
     消息处理工具类
     """
 
-    def __init__(self, config: AstrBotConfig, context: Context):
+    def __init__(self, config: AstrBotConfig, context: Context, image_caption_utils: ImageCaptionUtils):
         """初始化消息处理工具类"""
         self.config = config
         self.context = context
-        self.image_caption_utils = ImageCaptionUtils(context, config)
+        self.image_caption_utils = image_caption_utils
         self.component_handlers = {
             "Plain": self._handle_text_component,
             "Image": self._handle_image_component,

@@ -73,6 +73,10 @@ class ImageCaptionUtils:
             return 'image/gif'
         elif image_bytes.startswith(b'\xff\xd8\xff'):
             return 'image/jpeg'
+        elif image_bytes.startswith(b'RIFF') and image_bytes[8:12] == b'WEBP':
+            return 'image/webp'
+        elif image_bytes.startswith(b'BM'):
+            return 'image/bmp'
         # 如果无法识别，则默认为 jpeg
         return 'image/jpeg'
 

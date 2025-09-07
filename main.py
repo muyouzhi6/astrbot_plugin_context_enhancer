@@ -259,12 +259,12 @@ class ContextEnhancerV2(Star):
                 self.image_caption_utils = None
                 logger.warning("ImageCaptionUtils 不可用，将使用基础图片处理")
 
-            if MessageUtils is not None:
-                self.message_utils = MessageUtils(self.raw_config, self.context)
+            if MessageUtils is not None and self.image_caption_utils is not None:
+                self.message_utils = MessageUtils(self.raw_config, self.context, self.image_caption_utils)
                 logger.debug("MessageUtils 初始化成功")
             else:
                 self.message_utils = None
-                logger.warning("MessageUtils 不可用，将使用基础消息格式化")
+                logger.warning("MessageUtils 不可用（或其依赖项 ImageCaptionUtils 不可用），将使用基础消息格式化")
         except Exception as e:
             logger.error("工具类初始化失败: %s", e)
             self.image_caption_utils = None
@@ -804,6 +804,7 @@ class ContextEnhancerV2(Star):
                     return
 
         # 如果没有消息ID，回退到基于内容和发送者的模糊匹配
+        logger.warning("无法通过消息ID找到消息，将尝试通过内容进行模糊匹配。这在某些情况下可能不准确。")
         sender_id = event.get_sender_id()
         text_content = event.get_message_str()
         current_time = datetime.datetime.now()
