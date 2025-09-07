@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List
+from typing import List, Optional, Any
 import asyncio
 
 from astrbot.api import AstrBotConfig, logger
@@ -62,63 +62,51 @@ class MessageUtils:
         Returns:
             消息概要文本
         """
-        # 防止无限递归
         if current_depth >= max_depth:
             return "[回复内容过深]"
 
+        results: List[Optional[Any]] = [None] * len(message_list)
         tasks = []
-        results = []
-        # Keep track of where coroutine results should be inserted
-        placeholders = []
+        task_indices = []
 
         for i, component in enumerate(message_list):
             handler = self.component_handlers.get(
                 type(component).__name__, self._handle_unknown_component
             )
-            result = handler(component)
             
-            if asyncio.iscoroutine(result):
-                tasks.append(result)
-                # Mark the position and type of the coroutine
-                placeholders.append((i, type(component).__name__))
-                results.append(None)
+            # 检查 handler 是否是异步的
+            if asyncio.iscoroutinefunction(handler):
+                # 直接创建任务，但不立即 await
+                tasks.append(handler(component, max_depth=max_depth, current_depth=current_depth))
+                task_indices.append(i)
             else:
-                results.append(result)
+                results[i] = handler(component)
 
         if tasks:
-            coroutine_results = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            for i, (original_index, component_type) in enumerate(placeholders):
-                result = coroutine_results[i]
-                if component_type == "Image":
-                    results[original_index] = self._format_image_caption(result)
-                elif component_type == "Reply":
-                     if isinstance(result, Exception):
-                        results[original_index] = "[回复处理异常]"
-                     else:
-                        results[original_index] = result
-
-        # Replace any remaining Nones (e.g., from failed reply handling)
-        results = [res if res is not None else "" for res in results]
-
-        return "".join(str(r) for r in results)
+            # 一次性执行所有异步任务
+            task_results = await asyncio.gather(*tasks, return_exceptions=True)
+            for i, result in zip(task_indices, task_results):
+                if isinstance(result, Exception):
+                    logger.debug(f"处理组件 {type(message_list[i]).__name__} 时出错: {result}")
+                    results[i] = f"[{type(message_list[i]).__name__}处理异常]"
+                else:
+                    results[i] = result
+        
+        return "".join(str(res) for res in results if res is not None)
 
     def _handle_text_component(self, component: Plain) -> str:
         return component.text
 
-    def _handle_image_component(self, component: Image):
-        image = component.file if component.file else component.url
-        if image:
-            return self.image_caption_utils.generate_image_caption(image)
-        return "[图片]"
-
-    def _format_image_caption(self, caption_result) -> str:
-        if isinstance(caption_result, Exception):
-            logger.debug(f"单个图片描述生成失败: {caption_result}")
+    async def _handle_image_component(self, component: Image, **kwargs) -> str:
+        image_url = component.file or component.url
+        if not image_url:
             return "[图片]"
-        elif caption_result:
-            return f"[图片: {caption_result}]"
-        else:
+        
+        try:
+            caption = await self.image_caption_utils.generate_image_caption(image_url)
+            return f"[图片: {caption}]" if caption else "[图片]"
+        except Exception as e:
+            logger.debug(f"生成图片描述失败: {e}")
             return "[图片]"
 
     def _handle_face_component(self, component: Face) -> str:
@@ -130,9 +118,9 @@ class MessageUtils:
     def _handle_at_all_component(self, component: AtAll) -> str:
         return "[At:全体成员]"
 
-    async def _handle_reply_component(
-        self, component: Reply, max_depth: int = 3, current_depth: int = 0
-    ) -> str:
+    async def _handle_reply_component(self, component: Reply, **kwargs) -> str:
+        max_depth = kwargs.get("max_depth", 3)
+        current_depth = kwargs.get("current_depth", 0)
         if component.chain:
             sender_info = (
                 f"{component.sender_nickname}({component.sender_id})"

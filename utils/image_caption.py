@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 from typing import Optional, Union
+from collections import OrderedDict
 
 from astrbot.api.star import Context
 from astrbot.api import AstrBotConfig, logger
@@ -18,15 +19,13 @@ class ImageCaptionUtils:
         self.context = context
         self.config = config
         # 使用有界缓存避免内存泄漏
-        self._caption_cache = {}
         self._max_cache_size = 100  # 最大缓存条目数
+        self._caption_cache = OrderedDict()
 
     def _manage_cache(self, key: str, value: str):
-        """管理缓存大小，使用简单的FIFO（先进先出）策略"""
+        """管理缓存大小，使用 OrderedDict 实现 FIFO 策略"""
         if len(self._caption_cache) >= self._max_cache_size:
-            # 删除最早加入的缓存项
-            oldest_key = next(iter(self._caption_cache))
-            del self._caption_cache[oldest_key]
+            self._caption_cache.popitem(last=False)  # 移除最早的项
         self._caption_cache[key] = value
 
     def _generate_cache_key(self, image: Union[str, bytes]) -> Optional[str]:

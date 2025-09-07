@@ -660,33 +660,41 @@ class ContextEnhancerV2(Star):
         bot_replies: list,
     ) -> str:
         """将提取出的数据格式化为最终的 prompt 字符串"""
-        sender_id = event.get_sender_id()
         context_parts = [ContextConstants.PROMPT_HEADER]
 
-        if recent_chats:
-            context_parts.append(ContextConstants.RECENT_CHATS_HEADER)
-            context_parts.extend(recent_chats)
+        context_parts.extend(self._format_recent_chats_section(recent_chats))
+        context_parts.extend(self._format_bot_replies_section(bot_replies))
+        context_parts.append(self._format_situation_section(original_prompt, event))
+        context_parts.append(ContextConstants.PROMPT_FOOTER)
 
-        if bot_replies:
-            context_parts.append(ContextConstants.BOT_REPLIES_HEADER)
-            context_parts.extend(bot_replies)
+        return "\n".join(part for part in context_parts if part)
 
+    def _format_recent_chats_section(self, recent_chats: list) -> list:
+        """格式化最近的聊天记录部分"""
+        if not recent_chats:
+            return []
+        return [ContextConstants.RECENT_CHATS_HEADER] + recent_chats
+
+    def _format_bot_replies_section(self, bot_replies: list) -> list:
+        """格式化机器人回复部分"""
+        if not bot_replies:
+            return []
+        return [ContextConstants.BOT_REPLIES_HEADER] + bot_replies
+
+    def _format_situation_section(self, original_prompt: str, event: AstrMessageEvent) -> str:
+        """格式化当前情景部分"""
+        sender_id = event.get_sender_id()
         if sender_id:
             sender_name = event.get_sender_name() or "用户"
-            situation_template = ContextConstants.USER_TRIGGER_TEMPLATE.format(
+            return ContextConstants.USER_TRIGGER_TEMPLATE.format(
                 sender_name=sender_name,
                 sender_id=sender_id,
                 original_prompt=original_prompt,
             )
         else:
-            situation_template = ContextConstants.PROACTIVE_TRIGGER_TEMPLATE.format(
+            return ContextConstants.PROACTIVE_TRIGGER_TEMPLATE.format(
                 original_prompt=original_prompt
             )
-
-        context_parts.append(situation_template)
-        context_parts.append(ContextConstants.PROMPT_FOOTER)
-
-        return "\n".join(context_parts)
 
     # 添加记录机器人回复的功能
     @filter.on_llm_response(priority=100)
