@@ -7,6 +7,10 @@ from typing import cast
 from collections import deque
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.provider import ProviderRequest
+from astrbot.api.platform import MessageType
+
+# 导入被测试的插件类
+from main import ContextEnhancerV2, GroupMessage, ContextMessageType
 
 class MockMessageComponent:
     def __init__(self, type, data):
@@ -45,7 +49,6 @@ class MockAstrMessageEvent:
         self.unified_msg_origin = group_id
 
     def get_message_type(self):
-        from astrbot.api.platform import MessageType
         return MessageType.GROUP_MESSAGE
     
     def get_group_id(self):
@@ -61,9 +64,6 @@ class MockProviderRequest:
     def __init__(self, prompt):
         self.prompt = prompt
         self.image_urls = []
-
-# 导入被测试的插件类
-from main import ContextEnhancerV2, GroupMessage, ContextMessageType
 
 @patch('astrabot.api', MagicMock())
 class TestImagePassing(unittest.IsolatedAsyncioTestCase):

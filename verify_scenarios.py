@@ -1,8 +1,13 @@
 import asyncio
 import unittest
+import logging
 from unittest.mock import MagicMock, AsyncMock, patch
 from collections import deque
 import datetime
+
+# 配置日志记录
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 # 导入被测试的插件和官方的 ProviderRequest
 from main import ContextEnhancerV2, GroupMessage, ContextMessageType, ContextConstants
@@ -53,7 +58,7 @@ class MockEvent(MagicMock):
 class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         """在每个测试前运行"""
-        print(f"\n--- Running test: {self._testMethodName} ---")
+        logger.info(f"\n--- Running test: {self._testMethodName} ---")
         # 模拟 Context 对象
         mock_context = MagicMock()
         mock_config = MagicMock()
@@ -79,49 +84,49 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
 
     async def test_passive_user_trigger_scenario(self):
         """测试场景一：用户被动触发"""
-        print("Step 1: 构造一个包含有效用户信息的 Event 对象")
+        logger.info("Step 1: 构造一个包含有效用户信息的 Event 对象")
         event = MockEvent()
         event.message_obj = MockMessage(MockSender("10002", "李四"))
 
-        print("Step 2: 构造初始请求")
+        logger.info("Step 2: 构造初始请求")
         # 使用真实的 ProviderRequest 对象
         request = ProviderRequest(prompt="你有什么建议吗？")
 
-        print("Step 3: 调用 on_llm_request 方法")
+        logger.info("Step 3: 调用 on_llm_request 方法")
         await self.plugin.on_llm_request(event, request)
 
-        print("Step 4: 验证 Prompt 是否使用了 USER_TRIGGER_TEMPLATE")
+        logger.info("Step 4: 验证 Prompt 是否使用了 USER_TRIGGER_TEMPLATE")
         final_prompt = request.prompt
-        print(f"Final Prompt:\n---\n{final_prompt}\n---")
+        logger.info(f"Final Prompt:\n---\n{final_prompt}\n---")
         
         # 核心断言
         self.assertIn("现在 李四（ID: 10002）发了一个消息", final_prompt, "Prompt 应该包含用户触发信息")
         self.assertNotIn("主动就以下内容发表观点", final_prompt, "Prompt 不应该包含主动触发信息")
         
-        print("✅ Test Passed: 被动回复场景按预期工作。")
+        logger.info("✅ Test Passed: 被动回复场景按预期工作。")
 
     async def test_proactive_system_trigger_scenario(self):
         """测试场景二：系统主动触发"""
-        print("Step 1: 构造一个没有用户信息的 Event 对象 (sender=None)")
+        logger.info("Step 1: 构造一个没有用户信息的 Event 对象 (sender=None)")
         event = MockEvent()
         event.message_obj = MockMessage(sender=None) # 关键点：没有发送者
 
-        print("Step 2: 构造初始请求 (来自一个假设的定时任务)")
+        logger.info("Step 2: 构造初始请求 (来自一个假设的定时任务)")
         # 使用真实的 ProviderRequest 对象
         request = ProviderRequest(prompt="播报一则晚间新闻")
 
-        print("Step 3: 调用 on_llm_request 方法")
+        logger.info("Step 3: 调用 on_llm_request 方法")
         await self.plugin.on_llm_request(event, request)
 
-        print("Step 4: 验证 Prompt 是否使用了 PROACTIVE_TRIGGER_TEMPLATE")
+        logger.info("Step 4: 验证 Prompt 是否使用了 PROACTIVE_TRIGGER_TEMPLATE")
         final_prompt = request.prompt
-        print(f"Final Prompt:\n---\n{final_prompt}\n---")
+        logger.info(f"Final Prompt:\n---\n{final_prompt}\n---")
         
         # 核心断言
         self.assertIn("主动就以下内容发表观点: 播报一则晚间新闻", final_prompt, "Prompt 应该包含主动触发信息")
         self.assertNotIn("发了一个消息", final_prompt, "Prompt 不应该包含用户触发信息")
 
-        print("✅ Test Passed: 主动回复场景按预期工作。")
+        logger.info("✅ Test Passed: 主动回复场景按预期工作。")
 
 if __name__ == "__main__":
     unittest.main()

@@ -180,6 +180,8 @@ class ContextEnhancerV2(Star):
     - 异步处理，不阻塞主流程
     - 完善的错误处理和功能降级
     """
+    # 缓冲区大小乘数，用于为 deque 提供额外空间，避免在消息快速增长时频繁丢弃旧消息
+    CACHE_LOAD_BUFFER_MULTIPLIER = 2
 
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context, config)
@@ -275,11 +277,10 @@ class ContextEnhancerV2(Star):
     ) -> Dict[str, deque]:
         """从字典加载群组消息"""
         group_messages = {}
-        max_len_multiplier = 2  # 与 _get_group_buffer 保持一致
 
         # 计算 maxlen
         base_max_len = self.config.recent_chats_count + self.config.bot_replies_count
-        max_len = base_max_len * max_len_multiplier
+        max_len = base_max_len * self.CACHE_LOAD_BUFFER_MULTIPLIER
 
         for group_id, msg_list in data.items():
             # 为每个群组创建一个有最大长度限制的 deque
@@ -308,8 +309,7 @@ class ContextEnhancerV2(Star):
 
         if group_id not in self.group_messages:
             # 优化 maxlen 计算逻辑，使其与实际上下文使用的配置项关联
-            # 乘以 2 是为了提供一个缓冲区，避免在消息快速增长时 deque 频繁丢弃旧消息
-            max_len = (self.config.recent_chats_count + self.config.bot_replies_count) * 2
+            max_len = (self.config.recent_chats_count + self.config.bot_replies_count) * self.CACHE_LOAD_BUFFER_MULTIPLIER
             self.group_messages[group_id] = deque(maxlen=max_len)
         return self.group_messages[group_id]
 
@@ -539,14 +539,16 @@ class ContextEnhancerV2(Star):
                             custom_prompt=image_caption_prompt,
                         )
                         if caption:
-                            captions.append(f"图片{i + 1}: {caption}")
+                            # 直接存储纯净的描述文本
+                            captions.append(caption)
                         else:
-                            captions.append(f"图片{i + 1}")
+                            # 如果没有生成描述，可以添加一个默认占位符或空字符串
+                            captions.append("图片")
                     else:
-                        captions.append(f"图片{i + 1}")
+                        captions.append("图片")
                 except Exception as e:
                     logger.debug("生成图片%d描述失败: %s", i + 1, e)
-                    captions.append(f"图片{i + 1}")
+                    captions.append("图片")
 
             group_msg.image_captions = captions
 
@@ -646,10 +648,8 @@ class ContextEnhancerV2(Star):
                 text_part = f"{msg.sender_name}: {msg.text_content}"
                 caption_part = ""
                 if msg.image_captions:
-                    simple_captions = [
-                        c.split(": ", 1)[-1] for c in msg.image_captions
-                    ]
-                    caption_part = f" [图片: {'; '.join(simple_captions)}]"
+                    # 在格式化输出时动态添加前缀
+                    caption_part = f" [图片: {'; '.join(msg.image_captions)}]"
 
                 if msg.text_content or caption_part:
                     recent_chats.insert(0, f"{text_part}{caption_part}")
@@ -780,7 +780,7 @@ class ContextEnhancerV2(Star):
             logger.error("清空上下文缓存时发生错误: %s", e)
 
     @event_filter.command("reset", "new", description="清空上下文缓存")
-    async def on_command(self, event: AstrMessageEvent):
+    async def handle_clear_context_command(self, event: AstrMessageEvent):
         """处理 reset 和 new 命令，清空上下文缓存"""
         logger.info("收到清空上下文命令，为会话 %s 执行...", event.get_session_id())
         self.clear_context_cache()
