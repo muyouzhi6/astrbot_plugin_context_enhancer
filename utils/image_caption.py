@@ -19,7 +19,13 @@ class ImageCaptionUtils:
         """初始化图片转述工具类"""
         self.context = context
         self.config = config
-        self.session = aiohttp.ClientSession()
+        self.session: Optional[aiohttp.ClientSession] = None
+
+    async def _get_session(self) -> aiohttp.ClientSession:
+        """获取 aiohttp ClientSession，如果不存在或已关闭则创建新的"""
+        if self.session is None or self.session.closed:
+            self.session = aiohttp.ClientSession()
+        return self.session
 
     async def close(self):
         """关闭 aiohttp session"""
@@ -78,8 +84,9 @@ class ImageCaptionUtils:
             image_bytes = image
         elif isinstance(image, str) and image.startswith(('http://', 'https://')):
             try:
+                session = await self._get_session()
                 timeout_obj = aiohttp.ClientTimeout(total=timeout)
-                async with self.session.get(image, timeout=timeout_obj) as response:
+                async with session.get(image, timeout=timeout_obj) as response:
                     response.raise_for_status()
                     image_bytes = await response.read()
             except (aiohttp.ClientError, asyncio.TimeoutError) as e:

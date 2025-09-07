@@ -24,13 +24,9 @@ try:
     from .utils.image_caption import ImageCaptionUtils
     from .utils.message_utils import MessageUtils
 except ImportError:
-    try:
-        from utils.image_caption import ImageCaptionUtils
-        from utils.message_utils import MessageUtils
-    except ImportError:
-        ImageCaptionUtils = None
-        MessageUtils = None
-        logger.warning("utils 模块导入失败，将使用基础功能")
+    ImageCaptionUtils = None
+    MessageUtils = None
+    # _initialize_utils 方法中会记录详细日志
 
 
 # 消息类型枚举 - 重命名以避免冲突
@@ -658,7 +654,7 @@ class ContextEnhancerV2(Star):
                     caption_part = f" [图片: {'; '.join(msg.image_captions)}]"
 
                 if msg.text_content or caption_part:
-                    recent_chats.insert(0, f"{text_part}{caption_part}")
+                    recent_chats.append(f"{text_part}{caption_part}")
 
                 if msg.has_image:
                     for img in msg.images:
@@ -666,17 +662,22 @@ class ContextEnhancerV2(Star):
                             img, "file", None
                         )
                         if image_url:
-                            image_urls.insert(0, image_url)
+                            image_urls.append(image_url)
 
             elif (
                 len(bot_replies) < max_bot_replies
                 and msg.message_type == ContextMessageType.BOT_REPLY
             ):
-                bot_replies.insert(0, f"你回复了: {msg.text_content}")
+                bot_replies.append(f"你回复了: {msg.text_content}")
 
             # 如果两类消息都已收集足够，则提前结束循环
             if len(recent_chats) >= max_chats and len(bot_replies) >= max_bot_replies:
                 break
+        
+        # 反转列表以恢复正确的顺序
+        recent_chats.reverse()
+        bot_replies.reverse()
+        image_urls.reverse()
 
         return {
             "recent_chats": recent_chats,
