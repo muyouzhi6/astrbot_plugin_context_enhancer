@@ -9,6 +9,7 @@ from collections import deque
 import os
 from typing import Dict, Optional
 import time
+import uuid
 from dataclasses import dataclass
 
 from astrbot.api.event import filter as event_filter, AstrMessageEvent
@@ -24,11 +25,9 @@ try:
     from .utils.message_utils import MessageUtils
 except ImportError:
     try:
-        # 备用导入方式
         from utils.image_caption import ImageCaptionUtils
         from utils.message_utils import MessageUtils
     except ImportError:
-        # 如果导入失败，设置为 None，程序仍能正常运行
         ImageCaptionUtils = None
         MessageUtils = None
         logger.warning("utils 模块导入失败，将使用基础功能")
@@ -79,8 +78,10 @@ class GroupMessage:
                  group_id: str,
                  text_content: str = "",
                  images: Optional[list] = None,
-                 message_id: Optional[str] = None):
+                 message_id: Optional[str] = None,
+                 nonce: Optional[str] = None):
         self.id = message_id
+        self.nonce = nonce
         self.message_type = message_type
         self.timestamp = datetime.datetime.now()
         self.sender_id = sender_id
@@ -95,6 +96,7 @@ class GroupMessage:
         """将消息对象转换为可序列化为 JSON 的字典"""
         return {
             "id": self.id,
+            "nonce": self.nonce,
             "message_type": self.message_type,
             "timestamp": self.timestamp.isoformat(),
             "sender_name": self.sender_name,
@@ -116,7 +118,8 @@ class GroupMessage:
             group_id=data.get("group_id", ""),
             text_content=data.get("text_content", ""),
             images=[Image.fromURL(url=url) for url in data.get("image_urls", []) if url],
-            message_id=data.get("id")
+            message_id=data.get("id"),
+            nonce=data.get("nonce")
         )
         instance.timestamp = datetime.datetime.fromisoformat(data["timestamp"])
         instance.image_captions = data.get("image_captions", [])
@@ -151,7 +154,8 @@ class GroupMessage:
             group_id=event.get_group_id() or event.unified_msg_origin,
             text_content=_extract_text(event),
             images=_extract_images(event),
-            message_id=getattr(event, 'id', None) or getattr(event.message_obj, 'id', None)
+            message_id=getattr(event, 'id', None) or getattr(event.message_obj, 'id', None),
+            nonce=getattr(event, '_context_enhancer_nonce', None)
         )
 
 
@@ -450,6 +454,8 @@ class ContextEnhancerV2(Star):
 
         # 检查是否触发LLM
         if self._is_llm_triggered(event):
+            # 附加一个唯一标识符，用于后续精确匹配
+            setattr(event, '_context_enhancer_nonce', uuid.uuid4().hex)
             return ContextMessageType.LLM_TRIGGERED
 
         # 默认为普通聊天消息
@@ -797,26 +803,21 @@ class ContextEnhancerV2(Star):
         msg_id = getattr(event, 'id', None) or getattr(event.message_obj, 'id', None)
         if msg_id:
             for msg in reversed(buffer):
-                # 假设 GroupMessage 保存了原始 event 的 id
                 if getattr(msg, 'id', None) == msg_id:
                     msg.message_type = ContextMessageType.LLM_TRIGGERED
                     logger.debug("通过消息ID标记为LLM触发: %s...", msg.text_content[:50])
                     return
 
-        # 如果没有消息ID，回退到基于内容和发送者的模糊匹配
-        logger.warning("无法通过消息ID找到消息，将尝试通过内容进行模糊匹配。这在某些情况下可能不准确。")
-        sender_id = event.get_sender_id()
-        text_content = event.get_message_str()
-        current_time = datetime.datetime.now()
-
-        for msg in reversed(buffer):
-            time_diff = (current_time - msg.timestamp).total_seconds()
-            if (
-                time_diff <= ContextConstants.MESSAGE_MATCH_TIME_WINDOW and
-                msg.sender_id == sender_id and
-                msg.text_content == text_content and
-                msg.message_type != ContextMessageType.LLM_TRIGGERED
-            ):
-                msg.message_type = ContextMessageType.LLM_TRIGGERED
-                logger.debug("通过内容匹配标记为LLM触发: %s...", msg.text_content[:50])
-                return
+        # 其次，使用 nonce 进行精确匹配
+        nonce = getattr(event, '_context_enhancer_nonce', None)
+        if nonce:
+            for msg in reversed(buffer):
+                if msg.nonce == nonce:
+                    msg.message_type = ContextMessageType.LLM_TRIGGERED
+                    logger.debug("通过 nonce 标记为LLM触发: %s...", msg.text_content[:50])
+                    return
+        
+        # 如果两种精确匹配都失败，则记录并放弃
+        logger.warning(
+            "无法通过消息ID或nonce找到要标记的消息，放弃标记。这可能发生在消息处理延迟或状态不一致时。"
+        )

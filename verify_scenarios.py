@@ -1,16 +1,12 @@
 import asyncio
 import unittest
-import logging
 from unittest.mock import MagicMock, AsyncMock, patch
 from collections import deque
 import datetime
 
-# 配置日志记录
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
-
 # 导入被测试的插件和官方的 ProviderRequest
 from main import ContextEnhancerV2, GroupMessage, ContextMessageType, ContextConstants
+from astrbot.api import logger
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.platform import MessageType
 
