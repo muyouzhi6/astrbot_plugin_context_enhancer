@@ -33,10 +33,12 @@ class ImageCaptionUtils:
         try:
             # 对图片内容生成SHA256哈希值，减少内存占用
             return hashlib.sha256(image.encode("utf-8")).hexdigest()
-        except Exception as e:
-            # 如果哈希生成失败，使用截断的原始值作为备选
-            logger.debug(f"生成缓存键失败: {e}")
-            return image[:64] if len(image) > 64 else image
+        except (AttributeError, TypeError) as e:
+            # 如果 image 不是字符串或不支持切片，则捕获异常
+            logger.debug(f"生成缓存键失败，可能输入类型不是字符串: {e}")
+            # 降级：尝试将输入转换为字符串，然后截断
+            safe_image_str = str(image)
+            return safe_image_str[:64]
 
     async def generate_image_caption(
         self,

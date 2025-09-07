@@ -1,9 +1,12 @@
 import asyncio
 import unittest
 from unittest.mock import MagicMock, AsyncMock
+from typing import cast
 
 # 模拟 AstrBot 的核心类和组件
 from collections import deque
+from astrbot.api.event import AstrMessageEvent
+from astrbot.api.provider import ProviderRequest
 
 class MockMessageComponent:
     def __init__(self, type, data):
@@ -89,7 +92,7 @@ class TestImagePassing(unittest.TestCase):
 
             # 1. 模拟历史消息：发送一张图片
             image_event = MockAstrMessageEvent(sender, [MockImage(image_url)], group_id)
-            image_msg = GroupMessage(image_event, ContextMessageType.IMAGE_MESSAGE)
+            image_msg = GroupMessage(cast("AstrMessageEvent", image_event), ContextMessageType.IMAGE_MESSAGE)
             
             # 【修复】手动填充 images 列表，绕过 isinstance 检查失败的问题
             image_msg.images = [img for img in image_event.message_obj.message if isinstance(img, MockImage)]
@@ -107,7 +110,9 @@ class TestImagePassing(unittest.TestCase):
             request = MockProviderRequest("看这张图")
 
             # 3. 调用核心方法
-            await self.plugin.on_llm_request(trigger_event, request)
+            await self.plugin.on_llm_request(
+                cast("AstrMessageEvent", trigger_event), cast("ProviderRequest", request)
+            )
 
             # 4. 断言检查
             # 检查 prompt 是否包含图片描述
@@ -126,12 +131,13 @@ if __name__ == "__main__":
     from unittest.mock import MagicMock
     
     mock_astrobot_api = MagicMock()
-    sys.modules['astrophot.api'] = mock_astrobot_api
-    sys.modules['astrophot.api.event'] = MagicMock()
-    sys.modules['astrophot.api.star'] = MagicMock()
-    sys.modules['astrophot.api.provider'] = MagicMock()
-    sys.modules['astrophot.api.message_components'] = MagicMock()
-    sys.modules['astrophot.api.platform'] = MagicMock()
+    # 修正拼写错误：astrophot -> astrbot
+    sys.modules['astrabot.api'] = mock_astrobot_api
+    sys.modules['astrabot.api.event'] = MagicMock()
+    sys.modules['astrabot.api.star'] = MagicMock()
+    sys.modules['astrabot.api.provider'] = MagicMock()
+    sys.modules['astrabot.api.message_components'] = MagicMock()
+    sys.modules['astrabot.api.platform'] = MagicMock()
 
     # 运行测试
     unittest.main()

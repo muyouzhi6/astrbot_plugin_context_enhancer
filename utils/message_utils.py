@@ -191,7 +191,7 @@ class MessageUtils:
                     placeholder = f"[图片_PLACEHOLDER_{i}]"
                     if isinstance(caption, Exception):
                         # 如果某个图片处理失败，使用默认占位符
-                        logger.debug(f"图片描述生成失败: {caption}")
+                        logger.debug(f"单个图片描述生成失败: {caption}")
                         replacement = "[图片]"
                     elif caption:
                         replacement = f"[图片: {caption}]"
@@ -199,11 +199,16 @@ class MessageUtils:
                         replacement = "[图片]"
 
                     outline = outline.replace(placeholder, replacement)
-            except Exception as e:
-                # 如果并发处理完全失败，清理所有占位符
-                logger.error(f"图片并发处理失败: {e}")
+            except asyncio.CancelledError:
+                logger.warning("图片描述任务被取消")
                 for i in range(len(image_tasks)):
                     placeholder = f"[图片_PLACEHOLDER_{i}]"
-                    outline = outline.replace(placeholder, "[图片]")
+                    outline = outline.replace(placeholder, "[图片(处理被取消)]")
+            except Exception as e:
+                # 如果 gather 或结果处理过程出现意外错误
+                logger.error(f"图片描述并发处理流程发生意外错误: {e}")
+                for i in range(len(image_tasks)):
+                    placeholder = f"[图片_PLACEHOLDER_{i}]"
+                    outline = outline.replace(placeholder, "[图片(处理异常)]")
 
         return outline

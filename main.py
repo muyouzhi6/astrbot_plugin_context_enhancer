@@ -238,6 +238,10 @@ class ContextEnhancerV2(Star):
             "图片描述提示词": "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息",
             "处理@信息": True,
             "收集机器人回复": True,
+            # 兼容旧版配置，为 buffer size 提供默认值
+            "触发消息数量": 8,
+            "普通消息数量": 12,
+            "图片消息数量": 4,
         }
 
     def _get_group_buffer(self, group_id: str) -> deque:
@@ -252,12 +256,13 @@ class ContextEnhancerV2(Star):
             self._cleanup_inactive_groups(current_time)
 
         if group_id not in self.group_messages:
-            max_total = (
-                self.config.get("触发消息数量", 8)
-                + self.config.get("普通消息数量", 12)
-                + self.config.get("图片消息数量", 4)
-            ) * 2  # 预留空间
-            self.group_messages[group_id] = deque(maxlen=max_total)
+            # 优化 maxlen 计算逻辑，使其与实际上下文使用的配置项关联
+            # 乘以 2 是为了提供一个缓冲区，避免在消息快速增长时 deque 频繁丢弃旧消息
+            max_len = (
+                self.config.get("最近聊天记录数量", 15)
+                + self.config.get("机器人回复数量", 5)
+            ) * 2
+            self.group_messages[group_id] = deque(maxlen=max_len)
         return self.group_messages[group_id]
 
     def _cleanup_inactive_groups(self, current_time: datetime.datetime):
@@ -373,8 +378,8 @@ class ContextEnhancerV2(Star):
 
             # 如果发送者ID等于机器人ID，则是机器人自己的消息
             return bool(bot_id and sender_id and str(sender_id) == str(bot_id))
-        except Exception as e:
-            logger.debug(f"检查机器人消息时出错: {e}")
+        except (AttributeError, KeyError) as e:
+            logger.debug(f"检查机器人消息时出错（可能是不支持的事件类型或数据结构）: {e}")
             return False
 
     def _classify_message(self, event: AstrMessageEvent) -> str:
