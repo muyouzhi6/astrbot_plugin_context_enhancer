@@ -11,6 +11,15 @@ from astrbot.api.platform import MessageType
 
 # --- 模拟 AstrBot 核心对象 ---
 
+class MockMessageComponent:
+    def __init__(self, type, data):
+        self.type = type
+        self.data = data
+
+class MockPlain(MockMessageComponent):
+    def __init__(self, text):
+        super().__init__("text", {"text": text})
+
 class MockSender:
     def __init__(self, user_id, nickname):
         self.user_id = user_id
@@ -63,10 +72,9 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         
         # 模拟一些历史消息
         mock_event_past = MockEvent()
-        mock_event_past.message_obj = MockMessage(MockSender("10001", "张三"))
+        mock_event_past.message_obj = MockMessage(MockSender("10001", "张三"), [MockPlain("今天天气不错")])
         
-        past_msg = GroupMessage(mock_event_past, ContextMessageType.NORMAL_CHAT)
-        past_msg.text_content = "今天天气不错"
+        past_msg = GroupMessage.from_event(mock_event_past, ContextMessageType.NORMAL_CHAT)
         buffer.append(past_msg)
 
     async def test_passive_user_trigger_scenario(self):

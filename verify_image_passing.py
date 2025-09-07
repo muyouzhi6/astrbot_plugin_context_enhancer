@@ -102,11 +102,7 @@ class TestImagePassing(unittest.IsolatedAsyncioTestCase):
 
         # 1. 模拟历史消息：发送一张图片
         image_event = MockAstrMessageEvent(sender, [MockImage(image_url)], group_id)
-        image_msg = GroupMessage(cast("AstrMessageEvent", image_event), ContextMessageType.IMAGE_MESSAGE)
-        
-        # 【修复】手动填充 images 列表，绕过 isinstance 检查失败的问题
-        image_msg.images = [img for img in image_event.message_obj.message if isinstance(img, MockImage)]
-        image_msg.has_image = True
+        image_msg = GroupMessage.from_event(cast("AstrMessageEvent", image_event), ContextMessageType.IMAGE_MESSAGE)
 
         # 手动生成图片描述
         await self.plugin._generate_image_captions(image_msg)
