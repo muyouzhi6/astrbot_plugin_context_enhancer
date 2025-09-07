@@ -72,31 +72,27 @@ class ImageCaptionUtils:
             logger.warning("ImageCaptionUtils 未正确初始化")
             return None
 
-        # 确定使用的提供商
+        # --- 重构后的 Provider 获取逻辑 ---
+        provider = None
+
+        # 1. 尝试从函数参数获取
         if provider_id:
-            # 使用指定的提供商
             provider = self.context.get_provider_by_id(provider_id)
             if not provider:
-                logger.warning(
-                    f"无法找到指定的图片描述提供商: {provider_id}，尝试使用默认提供商"
-                )
-                provider = self.context.get_using_provider()
-        else:
-            # 尝试从全局image_processing配置获取
-            image_processing_config = self.config.get("image_processing", {})
-            global_provider_id = image_processing_config.get(
-                "image_caption_provider_id", ""
-            )
+                logger.warning(f"无法找到指定的提供商: {provider_id}，将尝试其他选项")
 
+        # 2. 如果上一步失败，尝试从全局配置获取
+        if not provider:
+            image_processing_config = self.config.get("image_processing", {})
+            global_provider_id = image_processing_config.get("image_caption_provider_id")
             if global_provider_id:
                 provider = self.context.get_provider_by_id(global_provider_id)
                 if not provider:
-                    logger.warning(
-                        f"无法找到全局配置的图片描述提供商: {global_provider_id}，使用默认提供商"
-                    )
-                    provider = self.context.get_using_provider()
-            else:
-                provider = self.context.get_using_provider()
+                    logger.warning(f"无法找到全局配置的提供商: {global_provider_id}，将使用默认提供商")
+
+        # 3. 如果仍然失败，使用默认提供商
+        if not provider:
+            provider = self.context.get_using_provider()
 
         if not provider:
             logger.warning("无法获取任何可用的LLM提供商")

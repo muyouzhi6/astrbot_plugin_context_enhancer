@@ -1,6 +1,6 @@
 from astrbot.api.event import filter, AstrMessageEvent
-from astrbot.api.star import Context, Star, register
-from astrbot.api import logger
+from astrbot.api.star import Context, Star, register, StarTools
+from astrbot.api import logger, AstrBotConfig
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.message_components import Plain, At, Image
 from astrbot.api.platform import MessageType
@@ -9,6 +9,8 @@ import json
 import datetime
 from collections import deque
 import os
+import shutil
+import pickle
 from typing import Dict, Any
 
 # 导入工具模块
@@ -97,7 +99,7 @@ class GroupMessage:
                     images.append(comp)
         return images
 
-    async def format_for_display_async(
+    async def format_for_display(
         self, include_images=True, message_utils=None
     ) -> str:
         """异步格式化消息用于显示，支持高级消息处理"""
@@ -121,19 +123,6 @@ class GroupMessage:
         else:
             # 简单格式化
             result = f"[{time_str}] {self.sender_name}: {self.text_content}"
-
-        if include_images and self.has_image:
-            result += f" [包含{len(self.images)}张图片"
-            if self.image_captions:
-                result += f" - {'; '.join(self.image_captions)}"
-            result += "]"
-
-        return result
-
-    def format_for_display(self, include_images=True, message_utils=None) -> str:
-        """同步格式化消息用于显示（保持兼容性）"""
-        time_str = self.timestamp.strftime("%H:%M")
-        result = f"[{time_str}] {self.sender_name}: {self.text_content}"
 
         if include_images and self.has_image:
             result += f" [包含{len(self.images)}张图片"
@@ -169,9 +158,9 @@ class ContextEnhancerV2(Star):
     - 完善的错误处理和功能降级
     """
 
-    def __init__(self, context: Context):
+    def __init__(self, context: Context, config: AstrBotConfig):
         self.context = context
-        self.config = self.load_config()
+        self.config = config
         logger.info("上下文增强器v2.0已初始化")
 
         # 初始化工具类
@@ -200,6 +189,20 @@ class ContextEnhancerV2(Star):
         self.group_messages = {}  # group_id -> deque of GroupMessage
         self.group_last_activity = {}  # group_id -> last_activity_time (用于清理不活跃群组)
 
+        # 加载持久化的上下文
+        self.data_dir = os.path.join(
+            StarTools.get_data_dir(), "astrbot_plugin_context_enhancer"
+        )
+        os.makedirs(self.data_dir, exist_ok=True)
+        self.cache_path = os.path.join(self.data_dir, "context_cache.pkl")
+        if os.path.exists(self.cache_path):
+            try:
+                with open(self.cache_path, "rb") as f:
+                    self.group_messages = pickle.load(f)
+                logger.info(f"成功从 {self.cache_path} 加载上下文缓存。")
+            except Exception as e:
+                logger.error(f"加载上下文缓存失败: {e}")
+
         # 显示当前配置
         logger.info(
             f"上下文增强器配置 - 聊天记录: {self.config.get('最近聊天记录数量', 15)}, "
@@ -207,42 +210,14 @@ class ContextEnhancerV2(Star):
             f"最大图片数: {self.config.get('上下文图片最大数量', 4)}"
         )
 
-    def load_config(self) -> Dict[str, Any]:
-        """加载配置文件，使用动态路径解析"""
+    def terminate(self):
+        """插件终止时，持久化上下文"""
         try:
-            # 获取插件目录的配置文件路径
-            plugin_dir = os.path.dirname(os.path.abspath(__file__))
-            config_path = os.path.join(plugin_dir, "config.json")
-
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    config = json.load(f)
-                    logger.debug(f"配置文件加载成功: {config_path}")
-                    return config
-            else:
-                logger.info("配置文件不存在，使用默认配置")
-                return self.get_default_config()
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error(f"配置文件加载失败，使用默认配置: {e}")
-            return self.get_default_config()
-
-    def get_default_config(self) -> Dict[str, Any]:
-        """获取默认配置"""
-        return {
-            "启用群组": [],  # 空列表表示对所有群生效
-            "最近聊天记录数量": 15,
-            "机器人回复数量": 5,
-            "上下文图片最大数量": 4,
-            "启用图片描述": True,
-            "图片描述提供商ID": "",
-            "图片描述提示词": "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息",
-            "处理@信息": True,
-            "收集机器人回复": True,
-            # 兼容旧版配置，为 buffer size 提供默认值
-            "触发消息数量": 8,
-            "普通消息数量": 12,
-            "图片消息数量": 4,
-        }
+            with open(self.cache_path, "wb") as f:
+                pickle.dump(self.group_messages, f)
+            logger.info(f"上下文缓存已成功保存到 {self.cache_path}")
+        except Exception as e:
+            logger.error(f"保存上下文缓存失败: {e}")
 
     def _get_group_buffer(self, group_id: str) -> deque:
         """获取群聊的消息缓冲区，并管理内存"""
@@ -696,103 +671,3 @@ class ContextEnhancerV2(Star):
                     msg.message_type = ContextMessageType.LLM_TRIGGERED
                     logger.debug(f"标记消息为LLM触发: {msg.text_content[:50]}...")
                     break
-
-    # async def _build_structured_context(
-    #     self, event: AstrMessageEvent, request: ProviderRequest
-    # ) -> dict:
-    #     """构建结构化的上下文信息"""
-    #     context_info = {
-    #         "triggered_messages": [],
-    #         "normal_messages": [],
-    #         "image_messages": [],
-    #         "bot_replies": [],  # 🤖 机器人回复消息
-    #         "atmosphere_summary": "",
-    #     }
-    #
-    #     # 🎯 参考SpectreCore方式：完全不使用request.conversation.history
-    #     # 避免套娃问题，只使用我们自己控制的群聊消息缓存
-    #
-    #     # 获取群聊消息缓存
-    #     if event.get_message_type() == MessageType.GROUP_MESSAGE:
-    #         group_id = (
-    #             event.get_group_id()
-    #             if hasattr(event, "get_group_id")
-    #             else event.unified_msg_origin
-    #         )
-    #         buffer = self._get_group_buffer(group_id)
-    #         logger.debug(f"群聊消息缓存大小: {len(buffer)}")
-    #
-    #         await self._collect_recent_messages(buffer, context_info)
-    #
-    #         logger.debug(
-    #             f"收集到的消息数量: 普通={len(context_info['normal_messages'])}, 触发={len(context_info['triggered_messages'])}, 图片={len(context_info['image_messages'])}, 机器人回复={len(context_info['bot_replies'])}"
-    #         )
-    #
-    #     return context_info
-    #
-    # async def _collect_recent_messages(self, buffer: deque, context_info: dict):
-    #     """从缓冲区收集最近的各类消息"""
-    #     max_triggered = self.config.get("触发消息数量", 8)
-    #     max_normal = self.config.get("普通消息数量", 12)
-    #     max_image = self.config.get("图片消息数量", 4)
-    #     max_bot_replies = self.config.get("机器人回复数量", 5)  # 🤖 机器人回复数量
-    #
-    #     triggered_count = 0
-    #     normal_count = 0
-    #     image_count = 0
-    #     bot_reply_count = 0
-    #
-    #     # 从最新的消息开始收集
-    #     for msg in reversed(buffer):
-    #         if (
-    #             msg.message_type == ContextMessageType.LLM_TRIGGERED
-    #             and triggered_count < max_triggered
-    #         ):
-    #             context_info["triggered_messages"].insert(0, msg)
-    #             triggered_count += 1
-    #         elif (
-    #             msg.message_type == ContextMessageType.NORMAL_CHAT
-    #             and normal_count < max_normal
-    #         ):
-    #             context_info["normal_messages"].insert(0, msg)
-    #             normal_count += 1
-    #         elif (
-    #             msg.message_type == ContextMessageType.IMAGE_MESSAGE
-    #             and image_count < max_image
-    #         ):
-    #             context_info["image_messages"].insert(0, msg)
-    #             image_count += 1
-    #         elif (
-    #             msg.message_type == ContextMessageType.BOT_REPLY
-    #             and bot_reply_count < max_bot_replies
-    #         ):  # 🤖
-    #             context_info["bot_replies"].insert(0, msg)
-    #             bot_reply_count += 1
-    #
-    #     # 分析群聊氛围（排除机器人回复）
-    #     if len(context_info["normal_messages"]) >= self.config.get(
-    #         "min_normal_messages_for_context", 3
-    #     ):
-    #         context_info["atmosphere_summary"] = self._analyze_atmosphere(
-    #             context_info["normal_messages"]
-    #         )
-    #
-    # def _analyze_atmosphere(self, normal_messages: list) -> str:
-    #     """分析群聊氛围"""
-    #     if not normal_messages:
-    #         return ""
-    #
-    #     # 简单的氛围分析
-    #     recent_topics = []
-    #     active_users = set()
-    #
-    #     for msg in normal_messages[-10:]:  # 最近10条消息
-    #         active_users.add(msg.sender_name)
-    #         if len(msg.text_content) > 5:  # 过滤太短的消息
-    #             recent_topics.append(f"{msg.sender_name}: {msg.text_content}")
-    #
-    #     atmosphere = f"最近活跃用户: {', '.join(list(active_users)[:5])}"
-    #     if recent_topics:
-    #         atmosphere += f"\n最近话题: {'; '.join(recent_topics[-3:])}"
-    #
-    #     return atmosphere
