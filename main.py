@@ -633,7 +633,7 @@ class ContextEnhancerV2(Star):
         context_parts.append(
             f"\n现在 {sender_name}（ID: {sender_id}）发了一个消息: {original_prompt}"
         )
-        context_parts.append("需要你根据你的设定和当前形势做出最自然的回复。")
+        context_parts.append("需要你在心里理清当前到底讨论的什么，搞清楚形势，谁在跟谁说话，你是在插话还是回复，然后根据你的设定和当前形势做出最自然的回复。")
 
         return "\n".join(context_parts)
 
@@ -800,3 +800,4 @@ class ContextEnhancerV2(Star):
             atmosphere += f"\n最近话题: {'; '.join(recent_topics[-3:])}"
 
         return atmosphere
+
