@@ -202,9 +202,9 @@ class ContextEnhancerV2(Star):
 
         # 显示当前配置
         logger.info(
-            f"上下文增强器配置 - 触发消息: {self.config.get('触发消息数量', 8)}, "
-            f"普通消息: {self.config.get('普通消息数量', 12)}, "
-            f"图片消息: {self.config.get('图片消息数量', 4)}"
+            f"上下文增强器配置 - 聊天记录: {self.config.get('最近聊天记录数量', 15)}, "
+            f"机器人回复: {self.config.get('机器人回复数量', 5)}, "
+            f"最大图片数: {self.config.get('上下文图片最大数量', 4)}"
         )
 
     def load_config(self) -> Dict[str, Any]:
@@ -230,13 +230,14 @@ class ContextEnhancerV2(Star):
         """获取默认配置"""
         return {
             "启用群组": [],  # 空列表表示对所有群生效
-            "普通消息数量": 12,  # 最近普通聊天消息数量
-            "触发消息数量": 8,  # 最近触发LLM的消息数量
-            "图片消息数量": 4,  # 最近图片消息数量
-            "启用图片描述": True,  # 是否启用图片描述
-            "处理@信息": True,  # 是否处理@信息
-            "收集机器人回复": True,  # 是否收集机器人回复
-            "机器人回复数量": 5,  # 机器人回复收集数量
+            "最近聊天记录数量": 15,
+            "机器人回复数量": 5,
+            "上下文图片最大数量": 4,
+            "启用图片描述": True,
+            "图片描述提供商ID": "",
+            "图片描述提示词": "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息",
+            "处理@信息": True,
+            "收集机器人回复": True,
         }
 
     def _get_group_buffer(self, group_id: str) -> deque:
@@ -520,24 +521,17 @@ class ContextEnhancerV2(Star):
                 logger.debug("没有群聊历史，跳过增强")
                 return
 
-            # 【优化】重构上下文构建流程
-            # 1. 从缓冲区收集消息和图片
-            collected_data = self._collect_context_messages(buffer)
-            
-            # 2. 将收集到的消息格式化为 prompt
-            enhanced_prompt = self._format_context_prompt(
-                collected_data["recent_chats"],
-                collected_data["bot_replies"],
-                request.prompt,
-                event
+            # 【重构】直接从 buffer 构建上下文和图片列表
+            context_data = self._format_context_and_images(
+                buffer, request.prompt, event
             )
 
+            enhanced_prompt = context_data["enhanced_prompt"]
             if enhanced_prompt and enhanced_prompt != request.prompt:
                 request.prompt = enhanced_prompt
-                logger.debug(f"简单上下文增强完成，新prompt长度: {len(enhanced_prompt)}")
-            
-            # 3. 将收集到的图片 URL 添加到请求中
-            image_urls = collected_data["image_urls"]
+                logger.debug(f"上下文增强完成，新prompt长度: {len(enhanced_prompt)}")
+
+            image_urls = context_data["image_urls"]
             if image_urls:
                 if not request.image_urls:
                     request.image_urls = []
@@ -548,51 +542,68 @@ class ContextEnhancerV2(Star):
         except Exception as e:
             logger.error(f"上下文增强时发生错误: {e}")
 
-    def _collect_context_messages(self, buffer: deque) -> dict:
-        """从缓冲区收集用于上下文的消息"""
+    def _format_context_and_images(
+        self, buffer: deque, original_prompt: str, event: AstrMessageEvent
+    ) -> dict:
+        """从 buffer 中收集消息、图片，并格式化为最终的 prompt"""
         recent_chats = []
         bot_replies = []
         image_urls = []
 
-        messages = list(buffer)[-20:]  # 最近20条消息
+        # 读取配置
+        max_chats = self.config.get("最近聊天记录数量", 15)
+        max_bot_replies = self.config.get("机器人回复数量", 5)
 
-        for msg in messages:
-            if msg.message_type in [ContextMessageType.NORMAL_CHAT, ContextMessageType.LLM_TRIGGERED, ContextMessageType.IMAGE_MESSAGE]:
+        # 从后向前遍历 buffer 来收集所需数量的消息
+        for msg in reversed(buffer):
+            if (
+                len(recent_chats) < max_chats
+                and msg.message_type
+                in [
+                    ContextMessageType.NORMAL_CHAT,
+                    ContextMessageType.LLM_TRIGGERED,
+                    ContextMessageType.IMAGE_MESSAGE,
+                ]
+            ):
                 text_part = f"{msg.sender_name}: {msg.text_content}"
                 caption_part = ""
                 if msg.image_captions:
-                    simple_captions = [c.split(': ', 1)[-1] for c in msg.image_captions]
+                    simple_captions = [c.split(": ", 1)[-1] for c in msg.image_captions]
                     caption_part = f" [图片: {'; '.join(simple_captions)}]"
-                
+
                 if msg.text_content or caption_part:
-                    recent_chats.append(f"{text_part}{caption_part}")
+                    recent_chats.insert(0, f"{text_part}{caption_part}")
 
                 if msg.has_image:
                     for img in msg.images:
-                        image_url = getattr(img, "url", None) or getattr(img, "file", None)
+                        image_url = getattr(img, "url", None) or getattr(
+                            img, "file", None
+                        )
                         if image_url:
-                            image_urls.append(image_url)
+                            image_urls.insert(0, image_url)
 
-            elif msg.message_type == ContextMessageType.BOT_REPLY:
-                bot_replies.append(f"你回复了: {msg.text_content}")
+            elif (
+                len(bot_replies) < max_bot_replies
+                and msg.message_type == ContextMessageType.BOT_REPLY
+            ):
+                bot_replies.insert(0, f"你回复了: {msg.text_content}")
+
+            # 如果两类消息都已收集足够，则提前结束循环
+            if len(recent_chats) >= max_chats and len(bot_replies) >= max_bot_replies:
+                break
         
-        return {"recent_chats": recent_chats, "bot_replies": bot_replies, "image_urls": image_urls}
-
-    def _format_context_prompt(self, recent_chats: list, bot_replies: list, original_prompt: str, event: AstrMessageEvent) -> str:
-        """将收集到的消息格式化为最终的 prompt，能区分用户触发和主动触发"""
+        # --- 拼接 Prompt ---
         sender_id = event.get_sender_id()
-
         context_parts = [ContextConstants.PROMPT_HEADER]
 
         if recent_chats:
             context_parts.append(ContextConstants.RECENT_CHATS_HEADER)
-            context_parts.extend(recent_chats[-8:])
+            context_parts.extend(recent_chats)
 
         if bot_replies:
             context_parts.append(ContextConstants.BOT_REPLIES_HEADER)
-            context_parts.extend(bot_replies[-3:])
+            context_parts.extend(bot_replies)
 
-        # 根据是否存在 sender_id 判断是用户触发还是主动触发
         if sender_id:
             sender_name = event.get_sender_name() or "用户"
             situation_template = ContextConstants.USER_TRIGGER_TEMPLATE.format(
@@ -604,11 +615,18 @@ class ContextEnhancerV2(Star):
             situation_template = ContextConstants.PROACTIVE_TRIGGER_TEMPLATE.format(
                 original_prompt=original_prompt
             )
-        
+
         context_parts.append(situation_template)
         context_parts.append(ContextConstants.PROMPT_FOOTER)
 
-        return "\n".join(context_parts)
+        # 根据配置截取最终的图片 URL 列表
+        max_images = self.config.get("上下文图片最大数量", 4)
+        final_image_urls = list(dict.fromkeys(image_urls))[-max_images:]
+
+        return {
+            "enhanced_prompt": "\n".join(context_parts),
+            "image_urls": final_image_urls,
+        }
 
     # 添加记录机器人回复的功能
     @filter.on_llm_response(priority=100)
