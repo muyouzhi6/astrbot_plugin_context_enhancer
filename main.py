@@ -724,6 +724,37 @@ class ContextEnhancerV2(Star):
         except Exception as e:
             logger.error(f"记录机器人回复时发生错误: {e}")
 
+    def clear_context_cache(self):
+        """清空所有上下文缓存"""
+        try:
+            # [诊断日志] 打印清空前的缓存状态
+            logger.info(f"[诊断] 清空前 group_messages 包含 {len(self.group_messages)} 个群组。")
+            logger.info(f"[诊断] 清空前 group_last_activity 包含 {len(self.group_last_activity)} 个群组。")
+
+            # 清空内存中的缓存
+            self.group_messages.clear()
+            self.group_last_activity.clear()
+            logger.info("内存中的上下文缓存已清空。")
+
+            # [诊断日志] 打印清空后的缓存状态
+            logger.info(f"[诊断] 清空后 group_messages 包含 {len(self.group_messages)} 个群组。")
+            logger.info(f"[诊断] 清空后 group_last_activity 包含 {len(self.group_last_activity)} 个群组。")
+
+            # 删除持久化的缓存文件
+            if os.path.exists(self.cache_path):
+                os.remove(self.cache_path)
+                logger.info(f"持久化缓存文件 {self.cache_path} 已删除。")
+            
+        except Exception as e:
+            logger.error(f"清空上下文缓存时发生错误: {e}")
+
+    @filter.command("reset", "new", description="清空上下文缓存")
+    async def on_command(self, event: AstrMessageEvent):
+        """处理 reset 和 new 命令，清空上下文缓存"""
+        command = getattr(event, 'command', None)
+        logger.info(f"收到命令 '{command}'，开始清空上下文缓存。")
+        self.clear_context_cache()
+
     async def _mark_current_as_llm_triggered(self, event: AstrMessageEvent):
         """将当前消息标记为LLM触发类型"""
         if event.get_message_type() == MessageType.GROUP_MESSAGE:
