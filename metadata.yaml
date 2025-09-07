@@ -1,6 +1,10 @@
 name: "astrbot_plugin_context_enhancer"
 author: "木有知"
 version: "2.0.0"
-description: "简单直接的上下文增强插件，为LLM提供群聊历史和机器人回复记录，帮助AI更好地理解对话语境。"
+description: "智能群聊上下文增强插件，通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境，支持角色扮演，完全兼容人设系统。"
 repo: "https://github.com/muyouzhi6/astrbot_plugin_context_enhancer"
+tags: ["工具", "聊天", "上下文增强"]
+license: "MIT"
+python_version: ">=3.8"
+astrophot_version: ">=3.5.0"
 

@@ -1,6 +1,6 @@
 import asyncio
 import unittest
-from unittest.mock import MagicMock, AsyncMock
+from unittest.mock import MagicMock, AsyncMock, patch
 from collections import deque
 import datetime
 
@@ -40,15 +40,22 @@ class MockEvent(MagicMock):
 
 # --- 测试用例 ---
 
+@patch('astrabot.api', MagicMock())
 class TestContextEnhancerScenarios(unittest.TestCase):
     def setUp(self):
         """在每个测试前运行"""
         print(f"\n--- Running test: {self._testMethodName} ---")
         # 模拟 Context 对象
         mock_context = MagicMock()
+        mock_config = MagicMock()
+
+        # 模拟配置的 get 方法
+        def mock_get(key, default=None):
+            return default
+        mock_config.get.side_effect = mock_get
         
         # 实例化插件
-        self.plugin = ContextEnhancerV2(mock_context)
+        self.plugin = ContextEnhancerV2(mock_context, mock_config)
         
         # 清空并预置聊天缓存
         self.plugin.group_messages = {}
@@ -62,7 +69,7 @@ class TestContextEnhancerScenarios(unittest.TestCase):
         past_msg.text_content = "今天天气不错"
         buffer.append(past_msg)
 
-    def test_passive_user_trigger_scenario(self):
+    async def test_passive_user_trigger_scenario(self):
         """测试场景一：用户被动触发"""
         print("Step 1: 构造一个包含有效用户信息的 Event 对象")
         event = MockEvent()
@@ -73,7 +80,7 @@ class TestContextEnhancerScenarios(unittest.TestCase):
         request = ProviderRequest(prompt="你有什么建议吗？")
 
         print("Step 3: 调用 on_llm_request 方法")
-        asyncio.run(self.plugin.on_llm_request(event, request))
+        await self.plugin.on_llm_request(event, request)
 
         print("Step 4: 验证 Prompt 是否使用了 USER_TRIGGER_TEMPLATE")
         final_prompt = request.prompt
@@ -85,7 +92,7 @@ class TestContextEnhancerScenarios(unittest.TestCase):
         
         print("✅ Test Passed: 被动回复场景按预期工作。")
 
-    def test_proactive_system_trigger_scenario(self):
+    async def test_proactive_system_trigger_scenario(self):
         """测试场景二：系统主动触发"""
         print("Step 1: 构造一个没有用户信息的 Event 对象 (sender=None)")
         event = MockEvent()
@@ -96,7 +103,7 @@ class TestContextEnhancerScenarios(unittest.TestCase):
         request = ProviderRequest(prompt="播报一则晚间新闻")
 
         print("Step 3: 调用 on_llm_request 方法")
-        asyncio.run(self.plugin.on_llm_request(event, request))
+        await self.plugin.on_llm_request(event, request)
 
         print("Step 4: 验证 Prompt 是否使用了 PROACTIVE_TRIGGER_TEMPLATE")
         final_prompt = request.prompt
@@ -108,34 +115,5 @@ class TestContextEnhancerScenarios(unittest.TestCase):
 
         print("✅ Test Passed: 主动回复场景按预期工作。")
 
-def run_tests():
-    """手动运行测试并打印结果"""
-    print("=============================================")
-    print("  开始验证 ContextEnhancerV2 的两种核心场景  ")
-    print("=============================================")
-    
-    # 创建测试实例
-    test_suite = TestContextEnhancerScenarios()
-    
-    # 手动运行测试一
-    try:
-        test_suite.setUp()
-        test_suite.test_passive_user_trigger_scenario()
-    except AssertionError as e:
-        print(f"❌ Test Failed: 被动回复场景测试失败 - {e}")
-    
-    print("\n---------------------------------------------\n")
-
-    # 手动运行测试二
-    try:
-        test_suite.setUp()
-        test_suite.test_proactive_system_trigger_scenario()
-    except AssertionError as e:
-        print(f"❌ Test Failed: 主动回复场景测试失败 - {e}")
-
-    print("\n=============================================")
-    print("              测试执行完毕              ")
-    print("=============================================")
-
 if __name__ == "__main__":
-    run_tests()
+    unittest.main()

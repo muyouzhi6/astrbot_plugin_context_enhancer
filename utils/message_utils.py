@@ -29,68 +29,16 @@ class MessageUtils:
         self.config = config
         self.context = context
         self.image_caption_utils = ImageCaptionUtils(context, config)
-
-    async def format_history_for_llm(
-        self, history_messages: List, max_messages: int = 20
-    ) -> str:
-        """
-        将历史消息列表格式化为适合输入给大模型的文本格式
-
-        Args:
-            history_messages: 历史消息列表
-            max_messages: 最大消息数量，默认20条
-
-        Returns:
-            格式化后的历史消息文本
-        """
-        if not history_messages:
-            return ""
-
-        # 限制消息数量
-        if len(history_messages) > max_messages:
-            history_messages = history_messages[-max_messages:]
-
-        formatted_text = ""
-        divider = "\n" + "---" + "\n"
-
-        for idx, msg in enumerate(history_messages):
-            # 获取发送者信息
-            sender_name = "未知用户"
-            sender_id = "unknown"
-            if hasattr(msg, "sender") and msg.sender:
-                sender_name = msg.sender.nickname or "未知用户"
-                sender_id = msg.sender.user_id or "unknown"
-
-            # 获取发送时间
-            send_time = "未知时间"
-            if hasattr(msg, "timestamp") and msg.timestamp and msg.timestamp > 0:
-                try:
-                    time_obj = datetime.fromtimestamp(msg.timestamp)
-                    send_time = time_obj.strftime("%Y-%m-%d %H:%M:%S")
-                except (OSError, ValueError, OverflowError) as e:
-                    logger.debug(f"时间戳转换失败: {e}")
-                    pass
-
-            # 获取消息内容 (异步调用)
-            message_content = (
-                await self.outline_message_list(msg.message)
-                if hasattr(msg, "message") and msg.message
-                else ""
-            )
-
-            # 格式化该条消息
-            message_text = f"发送者: {sender_name} (ID: {sender_id})\n"
-            message_text += f"时间: {send_time}\n"
-            message_text += f"内容: {message_content}"
-
-            # 添加到结果中
-            formatted_text += message_text
-
-            # 除了最后一条消息，每条消息后添加分割线
-            if idx < len(history_messages) - 1:
-                formatted_text += divider
-
-        return formatted_text
+        self.component_handlers = {
+            "Plain": self._handle_text_component,
+            "Image": self._handle_image_component,
+            "Face": self._handle_face_component,
+            "At": self._handle_at_component,
+            "AtAll": self._handle_at_all_component,
+            "Reply": self._handle_reply_component,
+            "Record": lambda i: "[语音]",
+            "Video": lambda i: "[视频]",
+        }
 
     async def outline_message_list(
         self,
@@ -118,97 +66,95 @@ class MessageUtils:
         if current_depth >= max_depth:
             return "[回复内容过深]"
 
-        outline = ""
+        tasks = []
+        results = []
+        # Keep track of where coroutine results should be inserted
+        placeholders = []
 
-        # 收集所有图片以便并发处理
-        image_tasks = []
-        image_indices = []
-
-        for idx, i in enumerate(message_list):
-            if isinstance(i, Plain):
-                outline += i.text
-            elif isinstance(i, Image):
-                # 收集图片任务，稍后并发处理
-                image = i.file if i.file else i.url
-                if image:
-                    image_tasks.append(
-                        self.image_caption_utils.generate_image_caption(image)
-                    )
-                    image_indices.append(idx)
-                    outline += f"[图片_PLACEHOLDER_{len(image_tasks) - 1}]"
-                else:
-                    outline += "[图片]"
-            elif isinstance(i, Face):
-                outline += f"[表情:{i.id}]"
-            elif isinstance(i, At):
-                outline += f"[At:{i.qq}{f'({i.name})' if i.name else ''}]"
-            elif isinstance(i, AtAll):
-                outline += "[At:全体成员]"
-            elif isinstance(i, Reply):
-                if i.chain:
-                    sender_info = (
-                        f"{i.sender_nickname}({i.sender_id})"
-                        if i.sender_nickname
-                        else f"{i.sender_id}"
-                    )
-                    # 异步调用，传递递归深度
-                    reply_content = await self.outline_message_list(
-                        i.chain, max_depth, current_depth + 1
-                    )
-                    outline += f"[回复({sender_info}: {reply_content})]"
-                elif i.message_str:
-                    sender_info = (
-                        f"{i.sender_nickname}({i.sender_id})"
-                        if i.sender_nickname
-                        else f"{i.sender_id}"
-                    )
-                    outline += f"[回复({sender_info}: {i.message_str})]"
-                else:
-                    outline += "[回复消息]"
-            elif isinstance(i, Record):
-                outline += "[语音]"
-            elif isinstance(i, Video):
-                outline += "[视频]"
+        for i, component in enumerate(message_list):
+            handler = self.component_handlers.get(
+                type(component).__name__, self._handle_unknown_component
+            )
+            result = handler(component)
+            
+            if asyncio.iscoroutine(result):
+                tasks.append(result)
+                # Mark the position and type of the coroutine
+                placeholders.append((i, type(component).__name__))
+                results.append(None)
             else:
-                # 对于其他所有类型，使用一个通用的占位符
-                # 这样可以避免因未来新增消息类型而导致解析失败
-                # i.type 属性通常是消息类型的字符串表示
-                if hasattr(i, "type"):
-                    outline += f"[{i.type}]"
-                else:
-                    outline += f"[{type(i).__name__}]"
+                results.append(result)
 
-        # 并发处理所有图片描述任务
-        if image_tasks:
-            try:
-                # 使用asyncio.gather并发执行所有图片描述任务
-                image_captions = await asyncio.gather(
-                    *image_tasks, return_exceptions=True
-                )
+        if tasks:
+            coroutine_results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            for i, (original_index, component_type) in enumerate(placeholders):
+                result = coroutine_results[i]
+                if component_type == "Image":
+                    results[original_index] = self._format_image_caption(result)
+                elif component_type == "Reply":
+                     if isinstance(result, Exception):
+                        results[original_index] = "[回复处理异常]"
+                     else:
+                        results[original_index] = result
 
-                # 替换占位符
-                for i, caption in enumerate(image_captions):
-                    placeholder = f"[图片_PLACEHOLDER_{i}]"
-                    if isinstance(caption, Exception):
-                        # 如果某个图片处理失败，使用默认占位符
-                        logger.debug(f"单个图片描述生成失败: {caption}")
-                        replacement = "[图片]"
-                    elif caption:
-                        replacement = f"[图片: {caption}]"
-                    else:
-                        replacement = "[图片]"
+        # Replace any remaining Nones (e.g., from failed reply handling)
+        results = [res if res is not None else "" for res in results]
 
-                    outline = outline.replace(placeholder, replacement)
-            except asyncio.CancelledError:
-                logger.warning("图片描述任务被取消")
-                for i in range(len(image_tasks)):
-                    placeholder = f"[图片_PLACEHOLDER_{i}]"
-                    outline = outline.replace(placeholder, "[图片(处理被取消)]")
-            except Exception as e:
-                # 如果 gather 或结果处理过程出现意外错误
-                logger.error(f"图片描述并发处理流程发生意外错误: {e}")
-                for i in range(len(image_tasks)):
-                    placeholder = f"[图片_PLACEHOLDER_{i}]"
-                    outline = outline.replace(placeholder, "[图片(处理异常)]")
+        return "".join(str(r) for r in results)
 
-        return outline
+    def _handle_text_component(self, component: Plain) -> str:
+        return component.text
+
+    def _handle_image_component(self, component: Image):
+        image = component.file if component.file else component.url
+        if image:
+            return self.image_caption_utils.generate_image_caption(image)
+        return "[图片]"
+
+    def _format_image_caption(self, caption_result) -> str:
+        if isinstance(caption_result, Exception):
+            logger.debug(f"单个图片描述生成失败: {caption_result}")
+            return "[图片]"
+        elif caption_result:
+            return f"[图片: {caption_result}]"
+        else:
+            return "[图片]"
+
+    def _handle_face_component(self, component: Face) -> str:
+        return f"[表情:{component.id}]"
+
+    def _handle_at_component(self, component: At) -> str:
+        return f"[At:{component.qq}{f'({component.name})' if component.name else ''}]"
+    
+    def _handle_at_all_component(self, component: AtAll) -> str:
+        return "[At:全体成员]"
+
+    async def _handle_reply_component(
+        self, component: Reply, max_depth: int = 3, current_depth: int = 0
+    ) -> str:
+        if component.chain:
+            sender_info = (
+                f"{component.sender_nickname}({component.sender_id})"
+                if component.sender_nickname
+                else f"{component.sender_id}"
+            )
+            reply_content = await self.outline_message_list(
+                component.chain, max_depth, current_depth + 1
+            )
+            return f"[回复({sender_info}: {reply_content})]"
+        elif component.message_str:
+            sender_info = (
+                f"{component.sender_nickname}({component.sender_id})"
+                if component.sender_nickname
+                else f"{component.sender_id}"
+            )
+            return f"[回复({sender_info}: {component.message_str})]"
+        else:
+            return "[回复消息]"
+
+    def _handle_unknown_component(self, component: BaseMessageComponent) -> str:
+        if hasattr(component, "type"):
+            return f"[{component.type}]"
+        else:
+            return f"[{type(component).__name__}]"

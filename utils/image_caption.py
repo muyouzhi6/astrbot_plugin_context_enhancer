@@ -1,6 +1,7 @@
 import asyncio
+import base64
 import hashlib
-from typing import Optional
+from typing import Optional, Union
 
 from astrbot.api.star import Context
 from astrbot.api import AstrBotConfig, logger
@@ -28,21 +29,48 @@ class ImageCaptionUtils:
             del self._caption_cache[oldest_key]
         self._caption_cache[key] = value
 
-    def _generate_cache_key(self, image: str) -> str:
-        """生成内存效率高的缓存键，使用SHA256哈希值"""
-        try:
-            # 对图片内容生成SHA256哈希值，减少内存占用
+    def _generate_cache_key(self, image: Union[str, bytes]) -> Optional[str]:
+        """
+        为图片内容生成SHA256哈希值作为缓存键。
+
+        Args:
+            image: 图片的base64编码字符串或字节数据。
+
+        Returns:
+            生成的缓存键（字符串），如果输入类型不支持则返回None。
+        """
+        if isinstance(image, str):
             return hashlib.sha256(image.encode("utf-8")).hexdigest()
-        except (AttributeError, TypeError) as e:
-            # 如果 image 不是字符串或不支持切片，则捕获异常
-            logger.debug(f"生成缓存键失败，可能输入类型不是字符串: {e}")
-            # 降级：尝试将输入转换为字符串，然后截断
-            safe_image_str = str(image)
-            return safe_image_str[:64]
+        elif isinstance(image, bytes):
+            return hashlib.sha256(image).hexdigest()
+        else:
+            logger.error(f"不支持的缓存键生成类型: {type(image)}")
+            return None
+
+    def _get_llm_provider(self, provider_id: Optional[str] = None):
+        """根据 provider_id 或全局配置获取LLM提供商"""
+        # 1. 尝试从函数参数获取
+        if provider_id:
+            provider = self.context.get_provider_by_id(provider_id)
+            if provider:
+                return provider
+            logger.warning(f"无法找到指定的提供商: {provider_id}，将尝试其他选项")
+
+        # 2. 如果上一步失败，尝试从全局配置获取
+        image_processing_config = self.config.get("image_processing", {})
+        global_provider_id = image_processing_config.get("image_caption_provider_id")
+        if global_provider_id:
+            provider = self.context.get_provider_by_id(global_provider_id)
+            if provider:
+                return provider
+            logger.warning(f"无法找到全局配置的提供商: {global_provider_id}，将使用默认提供商")
+
+        # 3. 如果仍然失败，使用默认提供商
+        return self.context.get_using_provider()
 
     async def generate_image_caption(
         self,
-        image: str,  # 图片的base64编码或URL
+        image: Union[str, bytes],  # 图片的base64编码或URL
         timeout: int = 30,
         provider_id: Optional[str] = None,  # 可选的提供商ID
         custom_prompt: Optional[str] = None,  # 自定义提示词
@@ -61,6 +89,8 @@ class ImageCaptionUtils:
         """
         # 生成内存效率高的缓存键
         cache_key = self._generate_cache_key(image)
+        if not cache_key:
+            return None
 
         # 检查缓存
         if cache_key in self._caption_cache:
@@ -72,27 +102,8 @@ class ImageCaptionUtils:
             logger.warning("ImageCaptionUtils 未正确初始化")
             return None
 
-        # --- 重构后的 Provider 获取逻辑 ---
-        provider = None
-
-        # 1. 尝试从函数参数获取
-        if provider_id:
-            provider = self.context.get_provider_by_id(provider_id)
-            if not provider:
-                logger.warning(f"无法找到指定的提供商: {provider_id}，将尝试其他选项")
-
-        # 2. 如果上一步失败，尝试从全局配置获取
-        if not provider:
-            image_processing_config = self.config.get("image_processing", {})
-            global_provider_id = image_processing_config.get("image_caption_provider_id")
-            if global_provider_id:
-                provider = self.context.get_provider_by_id(global_provider_id)
-                if not provider:
-                    logger.warning(f"无法找到全局配置的提供商: {global_provider_id}，将使用默认提供商")
-
-        # 3. 如果仍然失败，使用默认提供商
-        if not provider:
-            provider = self.context.get_using_provider()
+        # 获取LLM提供商
+        provider = self._get_llm_provider(provider_id)
 
         if not provider:
             logger.warning("无法获取任何可用的LLM提供商")
@@ -108,13 +119,15 @@ class ImageCaptionUtils:
                 "image_caption_prompt", "请直接简短描述这张图片"
             )
 
+        image_url: str = image if isinstance(image, str) else f"data:image/jpeg;base64,{base64.b64encode(image).decode()}"
+
         try:
             # 使用asyncio.wait_for添加超时控制
             llm_response = await asyncio.wait_for(
                 provider.text_chat(
                     prompt=prompt,
                     contexts=[],
-                    image_urls=[image],  # 图片链接，支持路径和网络链接
+                    image_urls=[image_url],  # 图片链接，支持路径和网络链接
                     system_prompt="",  # 系统提示，可以不传
                 ),
                 timeout=timeout,
