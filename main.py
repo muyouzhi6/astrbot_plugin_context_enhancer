@@ -41,29 +41,17 @@ class ContextConstants:
     MESSAGE_MATCH_TIME_WINDOW = 3  # 消息匹配时间窗口（秒）
     INACTIVE_GROUP_CLEANUP_DAYS = 7  # 不活跃群组清理天数
 
-    # 消息长度判断
-    MIN_MESSAGE_LENGTH_FOR_TRIGGER = 10  # 触发词检测的最小消息长度
-
     # 命令前缀
     COMMAND_PREFIXES = ["/", "!", "！", "#", ".", "。"]
 
-    # 触发关键词
-    TRIGGER_KEYWORDS = [
-        "bot",
-        "机器人",
-        "ai",
-        "助手",
-        "help",
-        "帮助",
-        "查询",
-        "搜索",
-        "翻译",
-        "计算",
-        "问答",
-    ]
-
-    # 机器人识别关键词
-    BOT_KEYWORDS = ["bot", "机器人", "助手", "ai"]
+    # Prompt 模板
+    PROMPT_HEADER = "你正在浏览聊天软件，查看群聊消息。"
+    RECENT_CHATS_HEADER = "\n最近的聊天记录:"
+    BOT_REPLIES_HEADER = "\n你最近的回复:"
+    # 区分用户触发和主动触发的模板
+    USER_TRIGGER_TEMPLATE = "\n现在 {sender_name}（ID: {sender_id}）发了一个消息: {original_prompt}"
+    PROACTIVE_TRIGGER_TEMPLATE = "\n你需要根据以上聊天记录，主动就以下内容发表观点: {original_prompt}"
+    PROMPT_FOOTER = "需要你在心里理清当前到底讨论的什么，搞清楚形势，谁在跟谁说话，你是在插话还是回复，然后根据你的设定和当前形势做出最自然的回复。"
 
 
 class GroupMessage:
@@ -169,24 +157,16 @@ class ContextEnhancerV2(Star):
     作者: 木有知 (https://github.com/muyouzhi6)
 
     功能特点:
-    - 🎯 智能"读空气"功能，深度理解群聊语境
-    - 🏗️ 分层信息架构，按重要性组织上下文
-    - 🎭 角色扮演支持，完美兼容人设系统
-    - 🤖 机器人回复收集，补充数据库记录不足
-    - 🔧 高度可配置，灵活适应不同需求
-
-    信息层次结构:
-    1. 当前群聊状态 - 群聊氛围、活跃用户、话题分析
-    2. 最近群聊内容 - 普通消息背景信息
-    3. 与你相关的对话 - 触发 AI 回复的重要对话
-    4. 最近图片信息 - 视觉上下文补充
-    5. 当前请求详情 - 详细的请求信息和触发方式
+    - 🎯 简单直接的上下文增强，参考SpectreCore的简洁方式
+    - 📝 自动收集群聊历史和机器人回复记录
+    - 🖼️ 支持图片描述和高级消息格式化（可选）
+    - 🛡️ 安全兼容，不覆盖system_prompt，不干扰其他插件
 
     技术保证:
     - 不影响 system_prompt，完全兼容人设系统
     - 使用合理优先级，不干扰其他插件
     - 异步处理，不阻塞主流程
-    - 完善的错误处理
+    - 完善的错误处理和功能降级
     """
 
     def __init__(self, context: Context):
@@ -391,18 +371,7 @@ class ContextEnhancerV2(Star):
             sender_id = event.get_sender_id()
 
             # 如果发送者ID等于机器人ID，则是机器人自己的消息
-            if bot_id and sender_id and str(sender_id) == str(bot_id):
-                return True
-
-            # 额外检查：某些平台可能有特殊标识
-            sender_name = (
-                event.get_sender_name().lower() if event.get_sender_name() else ""
-            )
-            if any(keyword in sender_name for keyword in ContextConstants.BOT_KEYWORDS):
-                # 这个额外检查只是模糊匹配，不能确定是否是当前机器人
-                logger.debug(f"检测到疑似机器人消息，发送者名称: {sender_name}")
-
-            return False
+            return bool(bot_id and sender_id and str(sender_id) == str(bot_id))
         except Exception as e:
             logger.debug(f"检查机器人消息时出错: {e}")
             return False
@@ -436,58 +405,32 @@ class ContextEnhancerV2(Star):
         return False
 
     def _is_llm_triggered(self, event: AstrMessageEvent) -> bool:
-        """判断消息是否会触发LLM回复"""
-        return (
-            self._contains_at_bot(event)
-            or self._is_command_message(event)
-            or self._is_wake_message(event)
-            or self._contains_trigger_words(event)
-        )
+        """判断消息是否会触发LLM回复（优化版）"""
+        # 1. 检查唤醒状态 (最高效)
+        if getattr(event, "is_wake", False) or getattr(
+            event, "is_at_or_wake_command", False
+        ):
+            return True
 
-    def _contains_at_bot(self, event: AstrMessageEvent) -> bool:
-        """检查消息是否@了机器人"""
-        if not (event.message_obj and event.message_obj.message):
-            return False
-
-        bot_id = event.get_self_id()
-        for comp in event.message_obj.message:
-            if isinstance(comp, At):
-                if str(comp.qq) == str(bot_id) or comp.qq == "all":
+        # 2. 检查@机器人
+        if event.message_obj and event.message_obj.message:
+            bot_id = event.get_self_id()
+            for comp in event.message_obj.message:
+                if isinstance(comp, At) and (str(comp.qq) == str(bot_id) or comp.qq == "all"):
                     return True
-        return False
 
-    def _is_command_message(self, event: AstrMessageEvent) -> bool:
-        """检查消息是否是命令"""
-        if not event.message_str:
+        # 3. 检查命令前缀 (需要处理字符串)
+        message_text = (event.message_str or "").lower().strip()
+        if not message_text:
             return False
 
-        message_text = event.message_str.lower().strip()
-
-        return any(
+        if any(
             message_text.startswith(prefix)
             for prefix in ContextConstants.COMMAND_PREFIXES
-        )
+        ):
+            return True
 
-    def _is_wake_message(self, event: AstrMessageEvent) -> bool:
-        """检查是否是唤醒状态的消息"""
-        return getattr(event, "is_wake", False) or getattr(
-            event, "is_at_or_wake_command", False
-        )
-
-    def _contains_trigger_words(self, event: AstrMessageEvent) -> bool:
-        """检查消息是否包含触发词"""
-        if not event.message_str:
-            return False
-
-        message_text = event.message_str.lower()
-
-        # 避免误判短消息
-        if len(message_text) <= ContextConstants.MIN_MESSAGE_LENGTH_FOR_TRIGGER:
-            return False
-
-        return any(
-            keyword in message_text for keyword in ContextConstants.TRIGGER_KEYWORDS
-        )
+        return False
 
     async def _generate_image_captions(self, group_msg: GroupMessage):
         """为图片生成智能描述，使用高级图片分析功能，支持独立的图片描述提供商"""
@@ -577,63 +520,93 @@ class ContextEnhancerV2(Star):
                 logger.debug("没有群聊历史，跳过增强")
                 return
 
-            # 构建简单上下文
-            enhanced_prompt = await self._build_simple_context(
-                buffer, request.prompt, event
+            # 【优化】重构上下文构建流程
+            # 1. 从缓冲区收集消息和图片
+            collected_data = self._collect_context_messages(buffer)
+            
+            # 2. 将收集到的消息格式化为 prompt
+            enhanced_prompt = self._format_context_prompt(
+                collected_data["recent_chats"],
+                collected_data["bot_replies"],
+                request.prompt,
+                event
             )
 
             if enhanced_prompt and enhanced_prompt != request.prompt:
                 request.prompt = enhanced_prompt
-                logger.debug(
-                    f"简单上下文增强完成，新prompt长度: {len(enhanced_prompt)}"
-                )
+                logger.debug(f"简单上下文增强完成，新prompt长度: {len(enhanced_prompt)}")
+            
+            # 3. 将收集到的图片 URL 添加到请求中
+            image_urls = collected_data["image_urls"]
+            if image_urls:
+                if not request.image_urls:
+                    request.image_urls = []
+                # 合并并去重
+                request.image_urls = list(dict.fromkeys(image_urls + request.image_urls))
+                logger.debug(f"上下文中新增了 {len(image_urls)} 张图片")
 
         except Exception as e:
             logger.error(f"上下文增强时发生错误: {e}")
-            # 出错时不影响正常流程
 
-    async def _build_simple_context(
-        self, buffer: deque, original_prompt: str, event: AstrMessageEvent
-    ) -> str:
-        """构建简单直接的上下文 - 类似SpectreCore的方式"""
-        # 获取用户信息
-        sender_name = (
-            event.message_obj.sender.nickname if event.message_obj.sender else "用户"
-        )
-        sender_id = (
-            event.message_obj.sender.user_id if event.message_obj.sender else "unknown"
-        )
-
-        # 收集最近的聊天记录（普通消息）
+    def _collect_context_messages(self, buffer: deque) -> dict:
+        """从缓冲区收集用于上下文的消息"""
         recent_chats = []
         bot_replies = []
+        image_urls = []
 
         messages = list(buffer)[-20:]  # 最近20条消息
 
         for msg in messages:
-            if msg.message_type == ContextMessageType.NORMAL_CHAT:
-                recent_chats.append(f"{msg.sender_name}: {msg.text_content}")
+            if msg.message_type in [ContextMessageType.NORMAL_CHAT, ContextMessageType.LLM_TRIGGERED, ContextMessageType.IMAGE_MESSAGE]:
+                text_part = f"{msg.sender_name}: {msg.text_content}"
+                caption_part = ""
+                if msg.image_captions:
+                    simple_captions = [c.split(': ', 1)[-1] for c in msg.image_captions]
+                    caption_part = f" [图片: {'; '.join(simple_captions)}]"
+                
+                if msg.text_content or caption_part:
+                    recent_chats.append(f"{text_part}{caption_part}")
+
+                if msg.has_image:
+                    for img in msg.images:
+                        image_url = getattr(img, "url", None) or getattr(img, "file", None)
+                        if image_url:
+                            image_urls.append(image_url)
+
             elif msg.message_type == ContextMessageType.BOT_REPLY:
                 bot_replies.append(f"你回复了: {msg.text_content}")
+        
+        return {"recent_chats": recent_chats, "bot_replies": bot_replies, "image_urls": image_urls}
 
-        # 构建简单的上下文
-        context_parts = ["你正在浏览聊天软件，查看群聊消息。"]
+    def _format_context_prompt(self, recent_chats: list, bot_replies: list, original_prompt: str, event: AstrMessageEvent) -> str:
+        """将收集到的消息格式化为最终的 prompt，能区分用户触发和主动触发"""
+        sender_id = event.get_sender_id()
 
-        # 添加最近聊天记录
+        context_parts = [ContextConstants.PROMPT_HEADER]
+
         if recent_chats:
-            context_parts.append("\n最近的聊天记录:")
-            context_parts.extend(recent_chats[-8:])  # 最近8条
+            context_parts.append(ContextConstants.RECENT_CHATS_HEADER)
+            context_parts.extend(recent_chats[-8:])
 
-        # 添加你最近的回复
         if bot_replies:
-            context_parts.append("\n你最近的回复:")
-            context_parts.extend(bot_replies[-3:])  # 最近3条回复
+            context_parts.append(ContextConstants.BOT_REPLIES_HEADER)
+            context_parts.extend(bot_replies[-3:])
 
-        # 当前情况
-        context_parts.append(
-            f"\n现在 {sender_name}（ID: {sender_id}）发了一个消息: {original_prompt}"
-        )
-        context_parts.append("需要你在心里理清当前到底讨论的什么，搞清楚形势，谁在跟谁说话，你是在插话还是回复，然后根据你的设定和当前形势做出最自然的回复。")
+        # 根据是否存在 sender_id 判断是用户触发还是主动触发
+        if sender_id:
+            sender_name = event.get_sender_name() or "用户"
+            situation_template = ContextConstants.USER_TRIGGER_TEMPLATE.format(
+                sender_name=sender_name,
+                sender_id=sender_id,
+                original_prompt=original_prompt,
+            )
+        else:
+            situation_template = ContextConstants.PROACTIVE_TRIGGER_TEMPLATE.format(
+                original_prompt=original_prompt
+            )
+        
+        context_parts.append(situation_template)
+        context_parts.append(ContextConstants.PROMPT_FOOTER)
 
         return "\n".join(context_parts)
 
@@ -701,103 +674,102 @@ class ContextEnhancerV2(Star):
                     logger.debug(f"标记消息为LLM触发: {msg.text_content[:50]}...")
                     break
 
-    async def _build_structured_context(
-        self, event: AstrMessageEvent, request: ProviderRequest
-    ) -> dict:
-        """构建结构化的上下文信息"""
-        context_info = {
-            "triggered_messages": [],
-            "normal_messages": [],
-            "image_messages": [],
-            "bot_replies": [],  # 🤖 机器人回复消息
-            "atmosphere_summary": "",
-        }
-
-        # 🎯 参考SpectreCore方式：完全不使用request.conversation.history
-        # 避免套娃问题，只使用我们自己控制的群聊消息缓存
-
-        # 获取群聊消息缓存
-        if event.get_message_type() == MessageType.GROUP_MESSAGE:
-            group_id = (
-                event.get_group_id()
-                if hasattr(event, "get_group_id")
-                else event.unified_msg_origin
-            )
-            buffer = self._get_group_buffer(group_id)
-            logger.debug(f"群聊消息缓存大小: {len(buffer)}")
-
-            await self._collect_recent_messages(buffer, context_info)
-
-            logger.debug(
-                f"收集到的消息数量: 普通={len(context_info['normal_messages'])}, 触发={len(context_info['triggered_messages'])}, 图片={len(context_info['image_messages'])}, 机器人回复={len(context_info['bot_replies'])}"
-            )
-
-        return context_info
-
-    async def _collect_recent_messages(self, buffer: deque, context_info: dict):
-        """从缓冲区收集最近的各类消息"""
-        max_triggered = self.config.get("触发消息数量", 8)
-        max_normal = self.config.get("普通消息数量", 12)
-        max_image = self.config.get("图片消息数量", 4)
-        max_bot_replies = self.config.get("机器人回复数量", 5)  # 🤖 机器人回复数量
-
-        triggered_count = 0
-        normal_count = 0
-        image_count = 0
-        bot_reply_count = 0
-
-        # 从最新的消息开始收集
-        for msg in reversed(buffer):
-            if (
-                msg.message_type == ContextMessageType.LLM_TRIGGERED
-                and triggered_count < max_triggered
-            ):
-                context_info["triggered_messages"].insert(0, msg)
-                triggered_count += 1
-            elif (
-                msg.message_type == ContextMessageType.NORMAL_CHAT
-                and normal_count < max_normal
-            ):
-                context_info["normal_messages"].insert(0, msg)
-                normal_count += 1
-            elif (
-                msg.message_type == ContextMessageType.IMAGE_MESSAGE
-                and image_count < max_image
-            ):
-                context_info["image_messages"].insert(0, msg)
-                image_count += 1
-            elif (
-                msg.message_type == ContextMessageType.BOT_REPLY
-                and bot_reply_count < max_bot_replies
-            ):  # 🤖
-                context_info["bot_replies"].insert(0, msg)
-                bot_reply_count += 1
-
-        # 分析群聊氛围（排除机器人回复）
-        if len(context_info["normal_messages"]) >= self.config.get(
-            "min_normal_messages_for_context", 3
-        ):
-            context_info["atmosphere_summary"] = self._analyze_atmosphere(
-                context_info["normal_messages"]
-            )
-
-    def _analyze_atmosphere(self, normal_messages: list) -> str:
-        """分析群聊氛围"""
-        if not normal_messages:
-            return ""
-
-        # 简单的氛围分析
-        recent_topics = []
-        active_users = set()
-
-        for msg in normal_messages[-10:]:  # 最近10条消息
-            active_users.add(msg.sender_name)
-            if len(msg.text_content) > 5:  # 过滤太短的消息
-                recent_topics.append(f"{msg.sender_name}: {msg.text_content}")
-
-        atmosphere = f"最近活跃用户: {', '.join(list(active_users)[:5])}"
-        if recent_topics:
-            atmosphere += f"\n最近话题: {'; '.join(recent_topics[-3:])}"
-
-        return atmosphere
-
+    # async def _build_structured_context(
+    #     self, event: AstrMessageEvent, request: ProviderRequest
+    # ) -> dict:
+    #     """构建结构化的上下文信息"""
+    #     context_info = {
+    #         "triggered_messages": [],
+    #         "normal_messages": [],
+    #         "image_messages": [],
+    #         "bot_replies": [],  # 🤖 机器人回复消息
+    #         "atmosphere_summary": "",
+    #     }
+    #
+    #     # 🎯 参考SpectreCore方式：完全不使用request.conversation.history
+    #     # 避免套娃问题，只使用我们自己控制的群聊消息缓存
+    #
+    #     # 获取群聊消息缓存
+    #     if event.get_message_type() == MessageType.GROUP_MESSAGE:
+    #         group_id = (
+    #             event.get_group_id()
+    #             if hasattr(event, "get_group_id")
+    #             else event.unified_msg_origin
+    #         )
+    #         buffer = self._get_group_buffer(group_id)
+    #         logger.debug(f"群聊消息缓存大小: {len(buffer)}")
+    #
+    #         await self._collect_recent_messages(buffer, context_info)
+    #
+    #         logger.debug(
+    #             f"收集到的消息数量: 普通={len(context_info['normal_messages'])}, 触发={len(context_info['triggered_messages'])}, 图片={len(context_info['image_messages'])}, 机器人回复={len(context_info['bot_replies'])}"
+    #         )
+    #
+    #     return context_info
+    #
+    # async def _collect_recent_messages(self, buffer: deque, context_info: dict):
+    #     """从缓冲区收集最近的各类消息"""
+    #     max_triggered = self.config.get("触发消息数量", 8)
+    #     max_normal = self.config.get("普通消息数量", 12)
+    #     max_image = self.config.get("图片消息数量", 4)
+    #     max_bot_replies = self.config.get("机器人回复数量", 5)  # 🤖 机器人回复数量
+    #
+    #     triggered_count = 0
+    #     normal_count = 0
+    #     image_count = 0
+    #     bot_reply_count = 0
+    #
+    #     # 从最新的消息开始收集
+    #     for msg in reversed(buffer):
+    #         if (
+    #             msg.message_type == ContextMessageType.LLM_TRIGGERED
+    #             and triggered_count < max_triggered
+    #         ):
+    #             context_info["triggered_messages"].insert(0, msg)
+    #             triggered_count += 1
+    #         elif (
+    #             msg.message_type == ContextMessageType.NORMAL_CHAT
+    #             and normal_count < max_normal
+    #         ):
+    #             context_info["normal_messages"].insert(0, msg)
+    #             normal_count += 1
+    #         elif (
+    #             msg.message_type == ContextMessageType.IMAGE_MESSAGE
+    #             and image_count < max_image
+    #         ):
+    #             context_info["image_messages"].insert(0, msg)
+    #             image_count += 1
+    #         elif (
+    #             msg.message_type == ContextMessageType.BOT_REPLY
+    #             and bot_reply_count < max_bot_replies
+    #         ):  # 🤖
+    #             context_info["bot_replies"].insert(0, msg)
+    #             bot_reply_count += 1
+    #
+    #     # 分析群聊氛围（排除机器人回复）
+    #     if len(context_info["normal_messages"]) >= self.config.get(
+    #         "min_normal_messages_for_context", 3
+    #     ):
+    #         context_info["atmosphere_summary"] = self._analyze_atmosphere(
+    #             context_info["normal_messages"]
+    #         )
+    #
+    # def _analyze_atmosphere(self, normal_messages: list) -> str:
+    #     """分析群聊氛围"""
+    #     if not normal_messages:
+    #         return ""
+    #
+    #     # 简单的氛围分析
+    #     recent_topics = []
+    #     active_users = set()
+    #
+    #     for msg in normal_messages[-10:]:  # 最近10条消息
+    #         active_users.add(msg.sender_name)
+    #         if len(msg.text_content) > 5:  # 过滤太短的消息
+    #             recent_topics.append(f"{msg.sender_name}: {msg.text_content}")
+    #
+    #     atmosphere = f"最近活跃用户: {', '.join(list(active_users)[:5])}"
+    #     if recent_topics:
+    #         atmosphere += f"\n最近话题: {'; '.join(recent_topics[-3:])}"
+    #
+    #     return atmosphere
