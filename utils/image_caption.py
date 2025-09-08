@@ -2,6 +2,7 @@ import asyncio
 import base64
 import aiohttp
 import hashlib
+import aiofiles
 from collections import OrderedDict
 from typing import Optional, Union
 
@@ -106,8 +107,8 @@ class ImageCaptionUtils:
             else:
                 try:
                     # 假定为本地文件路径
-                    with open(image, "rb") as f:
-                        image_bytes = f.read()
+                    async with aiofiles.open(image, "rb") as f:
+                        image_bytes = await f.read()
                 except FileNotFoundError:
                     logger.error(f"图片文件未找到: {image}")
                     return None

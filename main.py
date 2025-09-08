@@ -13,6 +13,7 @@ import uuid
 from dataclasses import dataclass
 import asyncio
 import aiofiles
+from aiofiles.os import remove as aio_remove
 
 from astrbot.api.event import filter as event_filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
@@ -780,7 +781,7 @@ class ContextEnhancerV2(Star):
         except Exception as e:
             logger.error(f"记录机器人回复时发生错误: {e}")
 
-    def clear_context_cache(self, group_id: Optional[str] = None):
+    async def clear_context_cache(self, group_id: Optional[str] = None):
         """
         清空上下文缓存。
         如果提供了 group_id，则只清空该群组的缓存。
@@ -807,8 +808,8 @@ class ContextEnhancerV2(Star):
                 logger.info("内存中的所有上下文缓存已清空。")
 
                 if os.path.exists(self.cache_path):
-                    os.remove(self.cache_path)
-                    logger.info(f"持久化缓存文件 {self.cache_path} 已删除。")
+                    await aio_remove(self.cache_path)
+                    logger.info(f"持久化缓存文件 {self.cache_path} 已异步删除。")
 
         except Exception as e:
             logger.error(f"清空上下文缓存时发生错误: {e}")
@@ -819,7 +820,7 @@ class ContextEnhancerV2(Star):
         group_id = event.get_group_id()
         if group_id:
             logger.info(f"收到为群组 {group_id} 清空上下文的命令...")
-            self.clear_context_cache(group_id=group_id)
+            await self.clear_context_cache(group_id=group_id)
         else:
             logger.warning("无法获取 group_id，无法执行定向清空操作。")
 
