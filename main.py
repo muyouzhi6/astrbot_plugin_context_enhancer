@@ -9,6 +9,7 @@ import datetime
 from collections import deque
 import os
 from typing import Dict, Optional
+from asyncio import Lock
 import time
 import uuid
 from dataclasses import dataclass
@@ -168,6 +169,7 @@ class ContextEnhancerV2(Star):
 
         # 群聊消息缓存 - 每个群独立存储
         self.group_messages: Dict[str, deque[GroupMessage]] = {}
+        self.group_locks: Dict[str, Lock] = {}
         self.group_last_activity: Dict[str, datetime.datetime] = {}
         self.last_cleanup_time = time.time()
 
@@ -252,6 +254,11 @@ class ContextEnhancerV2(Star):
         except Exception as e:
             logger.error(f"工具类初始化失败: {e}")
             self.image_caption_utils = None
+
+    def _get_or_create_lock(self, group_id: str) -> Lock:
+        if group_id not in self.group_locks:
+            self.group_locks[group_id] = Lock()
+        return self.group_locks[group_id]
 
     async def _load_cache_from_file(self):
         """从文件异步加载缓存"""
@@ -428,17 +435,19 @@ class ContextEnhancerV2(Star):
 
             # 添加到缓冲区前进行去重检查
             buffer = await self._get_group_buffer(group_msg.group_id)
+            lock = self._get_or_create_lock(group_msg.group_id)
 
-            # 🚨 防重复机制：检查是否已存在相同消息
-            if not self._is_duplicate_message(buffer, group_msg):
-                buffer.append(group_msg)
-                logger.debug(
-                    f"收集群聊消息 [{message_type}]: {group_msg.sender_name} - {group_msg.text_content[:50]}..."
-                )
-            else:
-                logger.debug(
-                    f"跳过重复消息: {group_msg.sender_name} - {group_msg.text_content[:30]}..."
-                )
+            async with lock:
+                # 🚨 防重复机制：检查是否已存在相同消息
+                if not self._is_duplicate_message(buffer, group_msg):
+                    buffer.append(group_msg)
+                    logger.debug(
+                        f"收集群聊消息 [{message_type}]: {group_msg.sender_name} - {group_msg.text_content[:50]}..."
+                    )
+                else:
+                    logger.debug(
+                        f"跳过重复消息: {group_msg.sender_name} - {group_msg.text_content[:30]}..."
+                    )
 
         except Exception as e:
             logger.error(f"处理群聊消息时发生错误: {e}")
@@ -639,12 +648,14 @@ class ContextEnhancerV2(Star):
                 return
 
             # 3. 确定场景（被动回复 vs 主动发言）
-            triggering_message, scene = self._find_triggering_message_from_event(buffer, event)
+            lock = self._get_or_create_lock(group_id)
+            async with lock:
+                triggering_message, scene = self._find_triggering_message_from_event(buffer, event)
 
-            # 4. 构建上下文增强内容
-            context_enhancement, image_urls = self._build_context_enhancement(
-                buffer, request.prompt, triggering_message, scene
-            )
+                # 4. 构建上下文增强内容
+                context_enhancement, image_urls = self._build_context_enhancement(
+                    buffer, request.prompt, triggering_message, scene
+                )
 
             # 5. 将上下文注入到请求中
             self._inject_context_into_request(request, context_enhancement, image_urls)
@@ -861,7 +872,9 @@ class ContextEnhancerV2(Star):
                 )
 
                 buffer = await self._get_group_buffer(group_id)
-                buffer.append(bot_reply)
+                lock = self._get_or_create_lock(group_id)
+                async with lock:
+                    buffer.append(bot_reply)
 
                 logger.debug(f"记录机器人回复: {response_text[:50]}...")
 
@@ -876,9 +889,11 @@ class ContextEnhancerV2(Star):
         """
         try:
             if group_id:
-                async with self._global_lock:
-                    self.group_messages.pop(group_id, None)
-                logger.info(f"已清空群组 {group_id} 的内存上下文缓存。")
+                if group_id in self.group_messages:
+                    lock = self._get_or_create_lock(group_id)
+                    async with lock:
+                        self.group_messages[group_id].clear()
+                    logger.info(f"已清空群组 {group_id} 的内存上下文缓存。")
                 if group_id in self.group_last_activity:
                     del self.group_last_activity[group_id]
             else:
