@@ -121,35 +121,38 @@ class GroupMessage:
         instance.image_captions = data.get("image_captions", [])
         return instance
 
+    @staticmethod
+    def _extract_text_from_event(event: AstrMessageEvent) -> str:
+        """从事件中提取纯文本内容"""
+        text = ""
+        if event.message_obj and event.message_obj.message:
+            for comp in event.message_obj.message:
+                if isinstance(comp, Plain):
+                    text += comp.text
+                elif isinstance(comp, At):
+                    text += f"@{comp.qq}"
+        return text.strip()
+
+    @staticmethod
+    def _extract_images_from_event(event: AstrMessageEvent) -> list:
+        """从事件中提取图片组件"""
+        images = []
+        if event.message_obj and event.message_obj.message:
+            for comp in event.message_obj.message:
+                if isinstance(comp, Image):
+                    images.append(comp)
+        return images
+
     @classmethod
     def from_event(cls, event: AstrMessageEvent, message_type: str):
         """从 AstrMessageEvent 创建 GroupMessage 对象"""
-        
-        def _extract_text(e: AstrMessageEvent) -> str:
-            text = ""
-            if e.message_obj and e.message_obj.message:
-                for comp in e.message_obj.message:
-                    if isinstance(comp, Plain):
-                        text += comp.text
-                    elif isinstance(comp, At):
-                        text += f"@{comp.qq}"
-            return text.strip()
-
-        def _extract_images(e: AstrMessageEvent) -> list:
-            images = []
-            if e.message_obj and e.message_obj.message:
-                for comp in e.message_obj.message:
-                    if isinstance(comp, Image):
-                        images.append(comp)
-            return images
-
         return cls(
             message_type=message_type,
             sender_id=event.get_sender_id() or "unknown",
             sender_name=event.get_sender_name() or "用户",
             group_id=event.get_group_id() or event.unified_msg_origin,
-            text_content=_extract_text(event),
-            images=_extract_images(event),
+            text_content=cls._extract_text_from_event(event),
+            images=cls._extract_images_from_event(event),
             message_id=getattr(event, 'id', None) or getattr(event.message_obj, 'id', None),
             nonce=getattr(event, '_context_enhancer_nonce', None)
         )
@@ -752,8 +755,8 @@ class ContextEnhancerV2(Star):
                 # 创建机器人回复记录
                 bot_reply = GroupMessage(
                     message_type=ContextMessageType.BOT_REPLY,
-                    sender_id="bot",
-                    sender_name="助手",
+                    sender_id=event.get_self_id(),
+                    sender_name=self.raw_config.get("name", "助手"),
                     group_id=group_id,
                     text_content=response_text
                 )

@@ -1,12 +1,18 @@
 import asyncio
 import base64
-import hashlib
 import aiohttp
+import hashlib
+from collections import OrderedDict
 from typing import Optional, Union
-from async_lru import alru_cache
 
 from astrbot.api.star import Context
 from astrbot.api import AstrBotConfig, logger
+
+
+# 模块级缓存，用于在所有实例之间共享
+_caption_cache: OrderedDict = OrderedDict()
+_cache_lock = asyncio.Lock()
+CACHE_MAX_SIZE = 128
 
 
 class ImageCaptionUtils:
@@ -68,7 +74,11 @@ class ImageCaptionUtils:
         # 如果无法识别，则返回 None
         return None
 
-    @alru_cache(maxsize=100)
+    @staticmethod
+    def _get_image_hash(image_content: bytes) -> str:
+        """计算图片内容的 SHA256 哈希值"""
+        return hashlib.sha256(image_content).hexdigest()
+
     async def generate_image_caption(
         self,
         image: Union[str, bytes],
@@ -76,45 +86,68 @@ class ImageCaptionUtils:
         provider_id: Optional[str] = None,
         custom_prompt: Optional[str] = None,
     ) -> Optional[str]:
-        """为单张图片生成文字描述，并使用基于内容的LRU缓存。"""
+        """为单张图片生成文字描述，并使用基于内容的共享LRU缓存。"""
         image_bytes: Optional[bytes] = None
-        
+
         # 1. 获取图片字节流
         if isinstance(image, bytes):
             image_bytes = image
-        elif isinstance(image, str) and image.startswith(('http://', 'https://')):
-            try:
-                session = await self._get_session()
-                timeout_obj = aiohttp.ClientTimeout(total=timeout)
-                async with session.get(image, timeout=timeout_obj) as response:
-                    response.raise_for_status()
-                    image_bytes = await response.read()
-            except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                logger.error("下载图片失败: %s, 错误: %s", image, e)
-                return None
-            except Exception as e:
-                logger.error("下载图片时发生未知错误: %s, 错误: %s", image, e)
-                return None
+        elif isinstance(image, str):
+            if image.startswith(('http://', 'https://')):
+                try:
+                    session = await self._get_session()
+                    timeout_obj = aiohttp.ClientTimeout(total=timeout)
+                    async with session.get(image, timeout=timeout_obj) as response:
+                        response.raise_for_status()
+                        image_bytes = await response.read()
+                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+                    logger.error(f"下载图片失败: {image}, 错误: {e}")
+                    return None
+                except Exception as e:
+                    logger.error(f"下载图片时发生未知错误: {image}, 错误: {e}")
+                    return None
+            else:
+                try:
+                    # 假定为本地文件路径
+                    with open(image, "rb") as f:
+                        image_bytes = f.read()
+                except FileNotFoundError:
+                    logger.error(f"图片文件未找到: {image}")
+                    return None
+                except Exception as e:
+                    logger.error(f"读取图片文件失败: {image}, 错误: {e}")
+                    return None
         else:
-            logger.error("无效的图片输入源: %s", type(image))
+            logger.error(f"无效的图片输入源: {type(image)}")
             return None
 
         if not image_bytes:
             return None
 
-        # 2. 如果缓存未命中，则调用LLM
+        # 2. 计算哈希并检查缓存
+        image_hash = self._get_image_hash(image_bytes)
+        # 缓存键包含图片内容哈希、自定义提示和提供商ID，以确保结果的唯一性
+        cache_key = (image_hash, custom_prompt, provider_id)
+
+        async with _cache_lock:
+            if cache_key in _caption_cache:
+                # 将命中的项目移到末尾（LRU行为）
+                _caption_cache.move_to_end(cache_key)
+                return _caption_cache[cache_key]
+
+        # 3. 如果缓存未命中，则调用LLM
         provider = self._get_llm_provider(provider_id)
         if not provider:
             logger.warning("无法获取任何可用的LLM提供商")
             return None
 
         prompt = custom_prompt or self.config.get("image_caption_prompt", "请直接简短描述这张图片")
-        
+
         mime_type = self._get_image_mime_type(image_bytes)
         if mime_type is None:
             logger.debug("无法识别图片MIME类型，将默认使用 'image/jpeg'")
             mime_type = 'image/jpeg'
-            
+
         image_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
 
         try:
@@ -122,13 +155,23 @@ class ImageCaptionUtils:
                 provider.text_chat(prompt=prompt, image_urls=[image_url]),
                 timeout=timeout
             )
-            return llm_response.completion_text
+            caption = llm_response.completion_text
+
+            # 4. 将新结果存入缓存
+            if caption:
+                async with _cache_lock:
+                    if len(_caption_cache) >= CACHE_MAX_SIZE:
+                        # 移除最久未使用的项目
+                        _caption_cache.popitem(last=False)
+                    _caption_cache[cache_key] = caption
+            
+            return caption
         except asyncio.TimeoutError:
-            logger.warning("图片转述超时，超过了%d秒", timeout)
+            logger.warning(f"图片转述超时，超过了{timeout}秒")
             return None
         except aiohttp.ClientError as e:
-            logger.error("图片转述LLM请求失败 (网络错误): %s", e)
+            logger.error(f"图片转述LLM请求失败 (网络错误): {e}")
             return None
         except Exception as e:
-            logger.error("图片转述LLM请求失败 (未知错误): %s", e)
+            logger.error(f"图片转述LLM请求失败 (未知错误): {e}")
             return None
