@@ -803,10 +803,13 @@ class ContextEnhancerV2(Star):
         group_id = event.get_group_id() or event.unified_msg_origin
         buffer = self._get_group_buffer(group_id)
         
+        # 定义一个较小的、固定的搜索窗口以优化性能
+        search_window = list(buffer)[-20:]
+
         # 优先使用消息ID进行精确匹配
         msg_id = getattr(event, 'id', None) or getattr(event.message_obj, 'id', None)
         if msg_id:
-            for msg in reversed(buffer):
+            for msg in reversed(search_window):
                 if getattr(msg, 'id', None) == msg_id:
                     msg.message_type = ContextMessageType.LLM_TRIGGERED
                     logger.debug("通过消息ID标记为LLM触发: %s...", msg.text_content[:50])
@@ -815,7 +818,7 @@ class ContextEnhancerV2(Star):
         # 其次，使用 nonce 进行精确匹配
         nonce = getattr(event, '_context_enhancer_nonce', None)
         if nonce:
-            for msg in reversed(buffer):
+            for msg in reversed(search_window):
                 if msg.nonce == nonce:
                     msg.message_type = ContextMessageType.LLM_TRIGGERED
                     logger.debug("通过 nonce 标记为LLM触发: %s...", msg.text_content[:50])

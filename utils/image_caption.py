@@ -9,9 +9,7 @@ from astrbot.api.star import Context
 from astrbot.api import AstrBotConfig, logger
 
 
-# 模块级缓存，用于在所有实例之间共享
-_caption_cache: OrderedDict = OrderedDict()
-_cache_lock = asyncio.Lock()
+# 缓存最大大小
 CACHE_MAX_SIZE = 128
 
 
@@ -26,6 +24,8 @@ class ImageCaptionUtils:
         self.context = context
         self.config = config
         self.session: Optional[aiohttp.ClientSession] = None
+        self._caption_cache: OrderedDict = OrderedDict()
+        self._cache_lock = asyncio.Lock()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取 aiohttp ClientSession，如果不存在或已关闭则创建新的"""
@@ -129,11 +129,11 @@ class ImageCaptionUtils:
         # 缓存键包含图片内容哈希、自定义提示和提供商ID，以确保结果的唯一性
         cache_key = (image_hash, custom_prompt, provider_id)
 
-        async with _cache_lock:
-            if cache_key in _caption_cache:
+        async with self._cache_lock:
+            if cache_key in self._caption_cache:
                 # 将命中的项目移到末尾（LRU行为）
-                _caption_cache.move_to_end(cache_key)
-                return _caption_cache[cache_key]
+                self._caption_cache.move_to_end(cache_key)
+                return self._caption_cache[cache_key]
 
         # 3. 如果缓存未命中，则调用LLM
         provider = self._get_llm_provider(provider_id)
@@ -159,11 +159,11 @@ class ImageCaptionUtils:
 
             # 4. 将新结果存入缓存
             if caption:
-                async with _cache_lock:
-                    if len(_caption_cache) >= CACHE_MAX_SIZE:
+                async with self._cache_lock:
+                    if len(self._caption_cache) >= CACHE_MAX_SIZE:
                         # 移除最久未使用的项目
-                        _caption_cache.popitem(last=False)
-                    _caption_cache[cache_key] = caption
+                        self._caption_cache.popitem(last=False)
+                    self._caption_cache[cache_key] = caption
             
             return caption
         except asyncio.TimeoutError:
