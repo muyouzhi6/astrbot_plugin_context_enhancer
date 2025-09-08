@@ -132,7 +132,7 @@ class GroupMessage:
 @register(
     "astrbot_plugin_context_enhancer",
     "木有知",
-    "智能群聊上下文增强插件v2.0，提供强大的'读空气'功能。通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境，支持角色扮演，完全兼容人设系统。",
+    "一个为 AstrBot 设计的智能上下文增强插件，它能让您的机器人在群聊中“知晓前文，见机行事”，实现真正意义上的流畅对话。",
     "2.0.0",
 )
 class ContextEnhancerV2(Star):
@@ -900,3 +900,4 @@ class ContextEnhancerV2(Star):
             await self.clear_context_cache(group_id=group_id)
         else:
             logger.warning("无法获取 group_id，无法执行定向清空操作。")
+
