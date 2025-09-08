@@ -132,7 +132,7 @@ class GroupMessage:
 @register(
     "astrbot_plugin_context_enhancer",
     "木有知",
-    "智能上下文增强插件，它能让您的机器人在群聊中“知晓前文，见机行事”，实现真正意义上的流畅对话。",
+    "智能群聊上下文增强插件v2.0，提供强大的'读空气'功能。通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境，支持角色扮演，完全兼容人设系统。",
     "2.0.0",
 )
 class ContextEnhancerV2(Star):
@@ -350,6 +350,9 @@ class ContextEnhancerV2(Star):
     @event_filter.platform_adapter_type(event_filter.PlatformAdapterType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """监听所有消息，进行分类和存储"""
+        if event.get_message_type() == MessageType.GROUP_MESSAGE and not event.get_group_id():
+            logger.warning("无法获取群组ID，已跳过上下文处理。")
+            return
         try:
             if not self.is_chat_enabled(event):
                 return
@@ -379,12 +382,25 @@ class ContextEnhancerV2(Star):
                     text_content_parts.append(f"@{comp.qq}")
                 elif isinstance(comp, Image):
                     images.append(comp)
+
+        # 1. 优先使用标准方法
+        sender_name = event.get_sender_name()
+
+        # 2. 如果标准方法失败，尝试从原始事件数据中获取 (兼容 aiocqhttp 等)
+        raw_event = getattr(event, 'raw_event', None)
+        if not sender_name and raw_event and isinstance(raw_event.get("sender"), dict):
+            sender = raw_event.get("sender")
+            # 优先使用群名片，其次是昵称
+            sender_name = sender.get("card") or sender.get("nickname")
+
+        # 3. 最后使用后备值 "用户"
+        final_sender_name = sender_name or "用户"
         
         return GroupMessage(
             message_type=message_type,
             sender_id=event.get_sender_id() or "unknown",
-            sender_name=event.get_sender_name() or "用户",
-            group_id=event.get_group_id() or event.unified_msg_origin,
+            sender_name=final_sender_name,
+            group_id=event.get_group_id(),
             text_content="".join(text_content_parts).strip(),
             images=images,
             # 尝试从不同事件结构中获取消息ID，兼容直接事件和包装后的事件对象
@@ -608,13 +624,15 @@ class ContextEnhancerV2(Star):
         LLM请求时提供上下文增强。
         此方法作为总入口，协调上下文的构建和注入流程。
         """
+        if event.get_message_type() == MessageType.GROUP_MESSAGE and not event.get_group_id():
+            return
         try:
             # 1. 检查是否需要增强
             if not self._should_enhance_context(event, request):
                 return
 
             # 2. 获取群聊历史记录
-            group_id = event.get_group_id() or event.unified_msg_origin
+            group_id = event.get_group_id()
             buffer = await self._get_group_buffer(group_id)
             if not buffer:
                 logger.debug("没有群聊历史，跳过增强")
@@ -665,15 +683,13 @@ class ContextEnhancerV2(Star):
 
         # 从后向前遍历 buffer 来收集所需数量的消息
         for msg in reversed(buffer):
-            if (
-                len(recent_chats) < max_chats
-                and msg.message_type
-                in [
-                    ContextMessageType.NORMAL_CHAT,
-                    ContextMessageType.LLM_TRIGGERED,
-                    ContextMessageType.IMAGE_MESSAGE,
-                ]
-            ):
+            # 如果两个列表都已填满，则立即停止遍历
+            if len(recent_chats) >= max_chats and len(bot_replies) >= max_bot_replies:
+                break
+
+            if msg.message_type == ContextMessageType.BOT_REPLY and len(bot_replies) < max_bot_replies:
+                bot_replies.append(f"你回复了: {msg.text_content}")
+            elif msg.message_type != ContextMessageType.BOT_REPLY and len(recent_chats) < max_chats:
                 # 强化输入净化
                 safe_sender_name = msg.sender_name.replace("\n", " ")
                 safe_text_content = msg.text_content.replace("\n", " ")
@@ -694,16 +710,6 @@ class ContextEnhancerV2(Star):
                         )
                         if image_url:
                             image_urls.append(image_url)
-
-            elif (
-                len(bot_replies) < max_bot_replies
-                and msg.message_type == ContextMessageType.BOT_REPLY
-            ):
-                bot_replies.append(f"你回复了: {msg.text_content}")
-
-            # 如果两类消息都已收集足够，则提前结束循环
-            if len(recent_chats) >= max_chats and len(bot_replies) >= max_bot_replies:
-                break
         
         # 反转列表以恢复正确的顺序
         recent_chats.reverse()
@@ -834,11 +840,7 @@ class ContextEnhancerV2(Star):
         """记录机器人的回复内容"""
         try:
             if event.get_message_type() == MessageType.GROUP_MESSAGE:
-                group_id = (
-                    event.get_group_id()
-                    if hasattr(event, "get_group_id")
-                    else event.unified_msg_origin
-                )
+                group_id = event.get_group_id()
 
                 # 获取回复文本
                 response_text = ""
@@ -900,5 +902,3 @@ class ContextEnhancerV2(Star):
             await self.clear_context_cache(group_id=group_id)
         else:
             logger.warning("无法获取 group_id，无法执行定向清空操作。")
-
-
