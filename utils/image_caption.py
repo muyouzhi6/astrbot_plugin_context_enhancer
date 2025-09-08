@@ -188,9 +188,9 @@ class ImageCaptionUtils:
                 timeout=timeout
             )
             return llm_response.completion_text
-        except TimeoutError:
+        except TimeoutError as e:
             logger.warning(f"图片转述超时，超过了{timeout}秒")
-            return None
+            raise e
         except ClientError as e:
             logger.error(f"图片转述LLM请求失败 (网络错误): {e}")
-            return None
+            raise e

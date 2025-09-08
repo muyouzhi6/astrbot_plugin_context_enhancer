@@ -386,6 +386,7 @@ class ContextEnhancerV2(Star):
             group_id=event.get_group_id() or event.unified_msg_origin,
             text_content="".join(text_content_parts).strip(),
             images=images,
+            # 尝试从不同事件结构中获取消息ID，兼容直接事件和包装后的事件对象
             message_id=getattr(event, 'id', None) or getattr(getattr(event, 'message_obj', None), 'id', None),
             nonce=getattr(event, '_context_enhancer_nonce', None)
         )
@@ -748,8 +749,8 @@ class ContextEnhancerV2(Star):
     ):
         """将生成的增强内容追加到 ProviderRequest 对象的末尾"""
         if context_enhancement:
-            # 核心逻辑：追加内容，而不是替换
-            request.prompt = f"{request.prompt}\n\n{context_enhancement}"
+            # 核心逻辑：直接使用增强后的内容覆盖原始 prompt
+            request.prompt = context_enhancement
             setattr(request, '_context_enhanced', True) # 设置标志位
             logger.debug(f"上下文追加完成，新prompt长度: {len(request.prompt)}")
 
