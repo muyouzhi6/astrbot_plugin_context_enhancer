@@ -9,7 +9,7 @@ from main import ContextEnhancerV2, GroupMessage, ContextMessageType, ContextCon
 from astrbot.api import logger
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.platform import MessageType
-from astrbot.api.message_components import Plain
+from astrbot.api.message_components import Plain, At
 
 # --- 模拟 AstrBot 核心对象 ---
 
@@ -111,7 +111,6 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         # 关键修复：确保 event 包含原始文本，以便 on_message 能处理
         event.message_str = "你有什么建议吗？"
         # 终极修复：确保 message_obj.message 列表被正确填充，并模拟 @ 消息
-        from astrbot.api.message_components import At
         bot_id = "self_123"
         event.message_obj = MockMessage(
             MockSender("10002", "李四"),

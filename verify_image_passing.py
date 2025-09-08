@@ -100,7 +100,6 @@ class TestImagePassing(unittest.IsolatedAsyncioTestCase):
         # 模拟 utils (避免真实的网络请求)
         self.plugin.image_caption_utils = MagicMock()
         self.plugin.image_caption_utils.generate_image_caption = AsyncMock(return_value="一只猫")
-        self.plugin.message_utils = None
 
 
     async def test_image_url_passing(self):

@@ -4,6 +4,7 @@
 """
 import traceback
 import json
+import re
 import datetime
 from collections import deque
 import os
@@ -385,7 +386,7 @@ class ContextEnhancerV2(Star):
             group_id=event.get_group_id() or event.unified_msg_origin,
             text_content="".join(text_content_parts).strip(),
             images=images,
-            message_id=getattr(event, 'id', None) or getattr(event.message_obj, 'id', None),
+            message_id=getattr(event, 'id', None) or getattr(getattr(event, 'message_obj', None), 'id', None),
             nonce=getattr(event, '_context_enhancer_nonce', None)
         )
 
@@ -484,7 +485,7 @@ class ContextEnhancerV2(Star):
             return ContextMessageType.NORMAL_CHAT
 
         # 3. 如果不是间接触发，也不是机器人自己的消息，那它就是一次需要LLM响应的普通消息
-        return ContextMessageType.LLM_TRIGGERED
+        return ContextMessageType.NORMAL_CHAT
 
     def _contains_image(self, event: AstrMessageEvent) -> bool:
         """检查消息是否包含图片"""
@@ -512,7 +513,9 @@ class ContextEnhancerV2(Star):
         
         # 检查纯文本
         message_text = event.message_str or ""
-        if f"@{bot_id}" in message_text:
+        # 使用正则表达式确保 @<bot_id> 是一个独立的词
+        pattern = rf'(^|\s)@{re.escape(str(bot_id))}($|\s)'
+        if re.search(pattern, message_text):
             return True
 
         return False
