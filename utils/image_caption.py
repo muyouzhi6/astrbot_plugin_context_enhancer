@@ -5,6 +5,9 @@ import hashlib
 import aiofiles
 from collections import OrderedDict
 from typing import Optional, Union
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
+from aiohttp import ClientError
+from asyncio import TimeoutError
 
 from astrbot.api.star import Context
 from astrbot.api import AstrBotConfig, logger
@@ -60,6 +63,20 @@ class ImageCaptionUtils:
         # 3. 如果仍然失败，使用默认提供商
         return self.context.get_using_provider()
 
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((ClientError, TimeoutError)),
+        reraise=True
+    )
+    async def _download_image(self, url: str, timeout: int) -> bytes:
+        """下载图片，带有重试机制"""
+        session = await self._get_session()
+        timeout_obj = aiohttp.ClientTimeout(total=timeout)
+        async with session.get(url, timeout=timeout_obj) as response:
+            response.raise_for_status()
+            return await response.read()
+
     def _get_image_mime_type(self, image_bytes: bytes) -> Optional[str]:
         """通过检查文件的魔术数字来检测常见的MIME类型"""
         if image_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
@@ -96,13 +113,9 @@ class ImageCaptionUtils:
         elif isinstance(image, str):
             if image.startswith(('http://', 'https://')):
                 try:
-                    session = await self._get_session()
-                    timeout_obj = aiohttp.ClientTimeout(total=timeout)
-                    async with session.get(image, timeout=timeout_obj) as response:
-                        response.raise_for_status()
-                        image_bytes = await response.read()
-                except (aiohttp.ClientError, asyncio.TimeoutError) as e:
-                    logger.error(f"下载图片失败: {image}, 错误: {e}")
+                    image_bytes = await self._download_image(image, timeout)
+                except (ClientError, TimeoutError) as e:
+                    logger.error(f"下载图片失败（已重试）: {image}, 错误: {e}")
                     return None
             else:
                 try:
@@ -149,25 +162,35 @@ class ImageCaptionUtils:
 
         image_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
 
+        caption = await self._caption_image_with_provider(provider, prompt, [image_url], timeout)
+
+        # 4. 将新结果存入缓存
+        if caption:
+            async with self._cache_lock:
+                if len(self._caption_cache) >= CACHE_MAX_SIZE:
+                    # 移除最久未使用的项目
+                    self._caption_cache.popitem(last=False)
+                self._caption_cache[cache_key] = caption
+        
+        return caption
+
+    @retry(
+        stop=stop_after_attempt(3),
+        wait=wait_exponential(multiplier=1, min=1, max=10),
+        retry=retry_if_exception_type((ClientError, TimeoutError)),
+        reraise=True
+    )
+    async def _caption_image_with_provider(self, provider, prompt, image_urls, timeout):
+        """调用LLM提供商进行图片描述，带有重试机制"""
         try:
             llm_response = await asyncio.wait_for(
-                provider.text_chat(prompt=prompt, image_urls=[image_url]),
+                provider.text_chat(prompt=prompt, image_urls=image_urls),
                 timeout=timeout
             )
-            caption = llm_response.completion_text
-
-            # 4. 将新结果存入缓存
-            if caption:
-                async with self._cache_lock:
-                    if len(self._caption_cache) >= CACHE_MAX_SIZE:
-                        # 移除最久未使用的项目
-                        self._caption_cache.popitem(last=False)
-                    self._caption_cache[cache_key] = caption
-            
-            return caption
-        except asyncio.TimeoutError:
+            return llm_response.completion_text
+        except TimeoutError:
             logger.warning(f"图片转述超时，超过了{timeout}秒")
             return None
-        except aiohttp.ClientError as e:
+        except ClientError as e:
             logger.error(f"图片转述LLM请求失败 (网络错误): {e}")
             return None

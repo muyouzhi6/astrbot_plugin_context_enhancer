@@ -9,6 +9,7 @@ from main import ContextEnhancerV2, GroupMessage, ContextMessageType, ContextCon
 from astrbot.api import logger
 from astrbot.api.provider import ProviderRequest
 from astrbot.api.platform import MessageType
+from astrbot.api.message_components import Plain
 
 # --- 模拟 AstrBot 核心对象 ---
 
@@ -17,9 +18,9 @@ class MockMessageComponent:
         self.type = type
         self.data = data
 
-class MockPlain(MockMessageComponent):
+class MockPlain(Plain):
     def __init__(self, text):
-        super().__init__("text", {"text": text})
+        super().__init__(text=text)
 
 class MockSender:
     def __init__(self, user_id, nickname):
@@ -45,6 +46,10 @@ class MockEvent(MagicMock):
     def get_group_id(self):
         return "test_group_123"
 
+    def get_self_id(self):
+        # 直接硬编码返回字符串，消除 mock 对象问题
+        return "self_123"
+
     def get_message_type(self):
         return MessageType.GROUP_MESSAGE # 修正：返回正确的枚举类型
 
@@ -67,9 +72,13 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
 
         # 模拟配置的 get 方法
         def mock_get(key, default=None):
-            if key == "command_prefixes":
-                return ["/", "!", "！", "#", ".", "。", "reset", "new"]
-            return default
+            config_map = {
+                "command_prefixes": ["/", "!", "！", "#", ".", "。", "reset", "new"],
+                "passive_reply_instruction": '现在，群成员 {sender_name} (ID: {sender_id}) 正在对你说话，或者提到了你，TA说："{original_prompt}"\n你需要根据以上聊天记录和你的角色设定，直接回复该用户。',
+                "active_speech_instruction": '以上是最近的聊天记录。现在，你决定主动参与讨论，并想就以下内容发表你的看法："{original_prompt}"\n你需要根据以上聊天记录和你的角色设定，自然地切入对话。'
+            }
+            return config_map.get(key, default)
+
         mock_config.get.side_effect = mock_get
         
         # 实例化插件
@@ -79,7 +88,7 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         
         # 清空并预置聊天缓存
         self.plugin.group_messages = {}
-        buffer = self.plugin._get_group_buffer("test_group_123")
+        buffer = await self.plugin._get_group_buffer("test_group_123")
         
         # 模拟一些历史消息
         mock_sender_past = MockSender("10001", "张三")
@@ -99,22 +108,37 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         """测试场景一：用户被动触发"""
         logger.info("Step 1: 构造一个包含有效用户信息的 Event 对象")
         event = MockEvent()
-        event.message_obj = MockMessage(MockSender("10002", "李四"))
+        # 关键修复：确保 event 包含原始文本，以便 on_message 能处理
+        event.message_str = "你有什么建议吗？"
+        # 终极修复：确保 message_obj.message 列表被正确填充，并模拟 @ 消息
+        from astrbot.api.message_components import At
+        bot_id = "self_123"
+        event.message_obj = MockMessage(
+            MockSender("10002", "李四"),
+            [At(qq=bot_id), MockPlain(" 你有什么建议吗？")]
+        )
+        event.message_str = f"@{bot_id} 你有什么建议吗？"
 
         logger.info("Step 2: 构造初始请求")
         # 使用真实的 ProviderRequest 对象
         request = ProviderRequest(prompt="你有什么建议吗？")
 
-        logger.info("Step 3: 调用 on_llm_request 方法")
+        logger.info("Step 3: [修正] 先调用 on_message 模拟消息入队，再调用 on_llm_request")
+        # 关键修复：必须先让 on_message 把消息记录到缓冲区
+        await self.plugin.on_message(event)
         await self.plugin.on_llm_request(event, request)
 
-        logger.info("Step 4: 验证 Prompt 是否使用了 USER_TRIGGER_TEMPLATE")
+        logger.info("Step 4: 验证 Prompt 是否使用了正确的被动回复指令")
         final_prompt = request.prompt
         logger.info(f"Final Prompt:\n---\n{final_prompt}\n---")
         
         # 核心断言
-        self.assertIn("现在 李四（ID: 10002）发了一个消息", final_prompt, "Prompt 应该包含用户触发信息")
-        self.assertNotIn("主动就以下内容发表观点", final_prompt, "Prompt 不应该包含主动触发信息")
+        # 验证是否包含被动回复指令的关键部分
+        self.assertIn('李四 (ID: 10002) 正在对你说话', final_prompt)
+        self.assertIn('TA说："你有什么建议吗？"', final_prompt)
+        self.assertIn("直接回复该用户", final_prompt)
+        # 验证不包含主动发言的指令
+        self.assertNotIn("主动参与讨论", final_prompt)
         
         logger.info("Test Passed: 被动回复场景按预期工作。")
 
@@ -131,13 +155,17 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         logger.info("Step 3: 调用 on_llm_request 方法")
         await self.plugin.on_llm_request(event, request)
 
-        logger.info("Step 4: 验证 Prompt 是否使用了 PROACTIVE_TRIGGER_TEMPLATE")
+        logger.info("Step 4: 验证 Prompt 是否使用了正确的主动发言指令")
         final_prompt = request.prompt
         logger.info(f"Final Prompt:\n---\n{final_prompt}\n---")
         
         # 核心断言
-        self.assertIn("主动就以下内容发表观点: 播报一则晚间新闻", final_prompt, "Prompt 应该包含主动触发信息")
-        self.assertNotIn("发了一个消息", final_prompt, "Prompt 不应该包含用户触发信息")
+        # 验证是否包含主动发言指令的关键部分
+        self.assertIn("主动参与讨论", final_prompt)
+        self.assertIn('想就以下内容发表你的看法："{original_prompt}"'.format(original_prompt="播报一则晚间新闻"), final_prompt)
+        self.assertIn("自然地切入对话", final_prompt)
+        # 验证不包含被动回复的指令
+        self.assertNotIn("正在对你说话", final_prompt)
 
         logger.info("Test Passed: 主动回复场景按预期工作。")
 
@@ -146,7 +174,8 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         logger.info("Step 1: 为两个不同的群组 group_A 和 group_B 添加消息")
         
         # 为 group_A 添加消息
-        self.plugin._get_group_buffer("group_A").append(GroupMessage(
+        await self.plugin._get_group_buffer("group_A")
+        self.plugin.group_messages["group_A"].append(GroupMessage(
             message_type=ContextMessageType.NORMAL_CHAT,
             sender_id="user_A",
             sender_name="UserA",
@@ -155,7 +184,8 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         ))
         
         # 为 group_B 添加消息
-        self.plugin._get_group_buffer("group_B").append(GroupMessage(
+        await self.plugin._get_group_buffer("group_B")
+        self.plugin.group_messages["group_B"].append(GroupMessage(
             message_type=ContextMessageType.NORMAL_CHAT,
             sender_id="user_B",
             sender_name="UserB",

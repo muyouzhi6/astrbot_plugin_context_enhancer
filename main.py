@@ -13,7 +13,7 @@ import uuid
 from dataclasses import dataclass
 import asyncio
 import aiofiles
-from aiofiles.os import remove as aio_remove
+from aiofiles.os import remove as aio_remove, rename as aio_rename
 
 from astrbot.api.event import filter as event_filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
@@ -25,10 +25,8 @@ from astrbot.api.platform import MessageType
 # 导入工具模块
 try:
     from .utils.image_caption import ImageCaptionUtils
-    from .utils.message_utils import MessageUtils
 except ImportError:
     ImageCaptionUtils = None
-    MessageUtils = None
     # _initialize_utils 方法中会记录详细日志
 
 
@@ -48,9 +46,7 @@ class ContextConstants:
     PROMPT_HEADER = "你正在浏览聊天软件，查看群聊消息。"
     RECENT_CHATS_HEADER = "\n最近的聊天记录:"
     BOT_REPLIES_HEADER = "\n你最近的回复:"
-    USER_TRIGGER_TEMPLATE = "\n现在 {sender_name}（ID: {sender_id}）发了一个消息: {original_prompt}"
-    PROACTIVE_TRIGGER_TEMPLATE = "\n你需要根据以上聊天记录，主动就以下内容发表观点: {original_prompt}"
-    PROMPT_FOOTER = "需要你在心里理清当前到底讨论的什么，搞清楚形势，谁在跟谁说话，你是在插话还是回复，然后根据你的设定和当前形势做出最自然的回复。"
+    PROMPT_FOOTER = "请基于以上信息，并严格按照你的角色设定，做出自然且符合当前对话氛围的回复。"
 
 
 @dataclass
@@ -68,6 +64,8 @@ class PluginConfig:
     command_prefixes: list
     duplicate_check_window_messages: int
     duplicate_check_time_seconds: int
+    passive_reply_instruction: str  # 被动回复指令
+    active_speech_instruction: str  # 主动发言指令
 
 
 class GroupMessage:
@@ -160,6 +158,7 @@ class ContextEnhancerV2(Star):
         super().__init__(context, config)
         self.raw_config = config
         self.config = self._load_plugin_config()
+        self._global_lock = asyncio.Lock()
         logger.info("上下文增强器v2.0已初始化")
 
         # 初始化工具类
@@ -187,16 +186,29 @@ class ContextEnhancerV2(Star):
     async def terminate(self):
         """插件终止时，异步持久化上下文并关闭会话"""
         # 异步持久化上下文
+        temp_path = self.cache_path + ".tmp"
         try:
             serializable_messages = {}
             for group_id, messages in self.group_messages.items():
                 serializable_messages[group_id] = [msg.to_dict() for msg in messages]
 
-            async with aiofiles.open(self.cache_path, "w", encoding="utf-8") as f:
+            # 1. 写入临时文件
+            async with aiofiles.open(temp_path, "w", encoding="utf-8") as f:
                 await f.write(json.dumps(serializable_messages, ensure_ascii=False, indent=4))
-            logger.info(f"上下文缓存已成功异步保存到 {self.cache_path}")
+
+            # 2. 原子性重命名
+            await aio_rename(temp_path, self.cache_path)
+            logger.info(f"上下文缓存已成功原子化保存到 {self.cache_path}")
+
         except Exception as e:
             logger.error(f"异步保存上下文缓存失败: {e}")
+        finally:
+            # 3. 确保清理临时文件
+            if os.path.exists(temp_path):
+                try:
+                    await aio_remove(temp_path)
+                except Exception as e:
+                    logger.error(f"清理临时缓存文件 {temp_path} 失败: {e}")
 
         # 关闭 aiohttp session
         if self.image_caption_utils and hasattr(self.image_caption_utils, 'close'):
@@ -220,6 +232,8 @@ class ContextEnhancerV2(Star):
             command_prefixes=self.raw_config.get("command_prefixes", ["/", "!", "！", "#", ".", "。"]),
             duplicate_check_window_messages=self.raw_config.get("duplicate_check_window_messages", 5),
             duplicate_check_time_seconds=self.raw_config.get("duplicate_check_time_seconds", 30),
+            passive_reply_instruction=self.raw_config.get("passive_reply_instruction", '现在，群成员 {sender_name} (ID: {sender_id}) 正在对你说话，或者提到了你，TA说："{original_prompt}"\n你需要根据以上聊天记录和你的角色设定，直接回复该用户。'),
+            active_speech_instruction=self.raw_config.get("active_speech_instruction", '以上是最近的聊天记录。现在，你决定主动参与讨论，并想就以下内容发表你的看法："{original_prompt}"\n你需要根据以上聊天记录和你的角色设定，自然地切入对话。'),
         )
 
     def _initialize_utils(self):
@@ -233,17 +247,9 @@ class ContextEnhancerV2(Star):
             else:
                 self.image_caption_utils = None
                 logger.warning("ImageCaptionUtils 不可用，将使用基础图片处理")
-
-            if MessageUtils is not None and self.image_caption_utils is not None:
-                self.message_utils = MessageUtils(self.raw_config, self.context, self.image_caption_utils)
-                logger.debug("MessageUtils 初始化成功")
-            else:
-                self.message_utils = None
-                logger.warning("MessageUtils 不可用（或其依赖项 ImageCaptionUtils 不可用），将使用基础消息格式化")
         except Exception as e:
             logger.error(f"工具类初始化失败: {e}")
             self.image_caption_utils = None
-            self.message_utils = None
 
     async def _load_cache_from_file(self):
         """从文件异步加载缓存"""
@@ -283,7 +289,7 @@ class ContextEnhancerV2(Star):
             group_messages[group_id] = message_deque
         return group_messages
 
-    def _get_group_buffer(self, group_id: str) -> deque:
+    async def _get_group_buffer(self, group_id: str) -> deque:
         """获取群聊的消息缓冲区，并管理内存"""
         current_dt = datetime.datetime.now()
 
@@ -297,9 +303,11 @@ class ContextEnhancerV2(Star):
             self.last_cleanup_time = now
 
         if group_id not in self.group_messages:
-            # 优化 maxlen 计算逻辑，使其与实际上下文使用的配置项关联
-            max_len = (self.config.recent_chats_count + self.config.bot_replies_count) * self.CACHE_LOAD_BUFFER_MULTIPLIER
-            self.group_messages[group_id] = deque(maxlen=max_len)
+            async with self._global_lock:
+                # 双重检查，防止在等待锁期间其他协程已创建
+                if group_id not in self.group_messages:
+                    max_len = (self.config.recent_chats_count + self.config.bot_replies_count) * self.CACHE_LOAD_BUFFER_MULTIPLIER
+                    self.group_messages[group_id] = deque(maxlen=max_len)
         return self.group_messages[group_id]
 
     def _cleanup_inactive_groups(self, current_time: datetime.datetime):
@@ -400,7 +408,7 @@ class ContextEnhancerV2(Star):
                 await self._generate_image_captions(group_msg)
 
             # 添加到缓冲区前进行去重检查
-            buffer = self._get_group_buffer(group_msg.group_id)
+            buffer = await self._get_group_buffer(group_msg.group_id)
 
             # 🚨 防重复机制：检查是否已存在相同消息
             if not self._is_duplicate_message(buffer, group_msg):
@@ -453,24 +461,30 @@ class ContextEnhancerV2(Star):
             return False
 
     def _classify_message(self, event: AstrMessageEvent) -> str:
-        """分类消息类型"""
-
-        # 🤖 首先检查是否是机器人消息
-        if self._is_bot_message(event) and self.config.bot_replies_count > 0: # 逻辑上更合理的检查
+        """
+        分类消息类型，区分直接触发和间接触发。
+        新的逻辑流程:
+        1. 直接触发 (用户@或指令) -> LLM_TRIGGERED (被动响应)
+        2. 间接触发 (wakepro等) -> NORMAL_CHAT (主动发言)
+        3. 其他按原逻辑处理
+        """
+        # 🤖 首先检查是否是机器人自己的消息
+        if self._is_bot_message(event) and self.config.bot_replies_count > 0:
             return ContextMessageType.BOT_REPLY
 
-        # 检查是否包含图片
-        if self._contains_image(event):
-            return ContextMessageType.IMAGE_MESSAGE
-
-        # 检查是否触发LLM
-        if self._is_llm_triggered(event):
+        # 1. 检查是否为用户直接触发
+        if self._is_directly_triggered(event):
             # 附加一个唯一标识符，用于后续精确匹配
             setattr(event, '_context_enhancer_nonce', uuid.uuid4().hex)
             return ContextMessageType.LLM_TRIGGERED
 
-        # 默认为普通聊天消息
-        return ContextMessageType.NORMAL_CHAT
+        # 2. 检查是否为间接触发（例如被 wakepro 唤醒）
+        # 根据新逻辑，这种情况被视为普通聊天，以体现“主动发言”的角色扮演
+        if self._is_indirectly_triggered(event):
+            return ContextMessageType.NORMAL_CHAT
+
+        # 3. 如果不是间接触发，也不是机器人自己的消息，那它就是一次需要LLM响应的普通消息
+        return ContextMessageType.LLM_TRIGGERED
 
     def _contains_image(self, event: AstrMessageEvent) -> bool:
         """检查消息是否包含图片"""
@@ -482,33 +496,25 @@ class ContextEnhancerV2(Star):
                 return True
         return False
 
-    def _is_llm_triggered(self, event: AstrMessageEvent) -> bool:
-        """判断消息是否会触发LLM回复（优化版）"""
-        # 1. 检查唤醒状态 (最高效)
-        if getattr(event, "is_wake", False) or getattr(
-            event, "is_at_or_wake_command", False
-        ):
-            return True
-
-        # 2. 检查@机器人
-        if self._is_at_triggered(event):
-            return True
-
-        # 3. 检查命令前缀
-        if self._is_keyword_triggered(event):
-            return True
-
-        return False
-
     def _is_at_triggered(self, event: AstrMessageEvent) -> bool:
         """检查消息是否通过@机器人触发"""
+        bot_id = event.get_self_id()
+        if not bot_id:
+            return False
+
+        # 检查消息组件
         if event.message_obj and event.message_obj.message:
-            bot_id = event.get_self_id()
             for comp in event.message_obj.message:
                 if isinstance(comp, At) and (
                     str(comp.qq) == str(bot_id) or comp.qq == "all"
                 ):
                     return True
+        
+        # 检查纯文本
+        message_text = event.message_str or ""
+        if f"@{bot_id}" in message_text:
+            return True
+
         return False
 
     def _is_keyword_triggered(self, event: AstrMessageEvent) -> bool:
@@ -520,6 +526,22 @@ class ContextEnhancerV2(Star):
         return any(
             message_text.startswith(prefix)
             for prefix in self.config.command_prefixes
+        )
+
+    def _is_directly_triggered(self, event: AstrMessageEvent) -> bool:
+        """
+        检查消息是否由用户直接触发（@机器人或使用命令词）。
+        这代表了最明确的用户交互意图。
+        """
+        return self._is_at_triggered(event) or self._is_keyword_triggered(event)
+
+    def _is_indirectly_triggered(self, event: AstrMessageEvent) -> bool:
+        """
+        检查消息是否由间接方式触发（如 wakepro 插件的智能唤醒）。
+        这通常不被视为用户直接的对话意图。
+        """
+        return getattr(event, "is_wake", False) or getattr(
+            event, "is_at_or_wake_command", False
         )
 
     async def _generate_image_captions(self, group_msg: GroupMessage):
@@ -577,69 +599,54 @@ class ContextEnhancerV2(Star):
 
     @event_filter.on_llm_request(priority=100)
     async def on_llm_request(self, event: AstrMessageEvent, request: ProviderRequest):
-        """LLM请求时提供简单直接的上下文增强"""
+        """
+        LLM请求时提供上下文增强。
+        此方法作为总入口，协调上下文的构建和注入流程。
+        """
         try:
-            # 简单检测：避免重复增强
-            if request.prompt and "你正在浏览聊天软件" in request.prompt:
-                logger.debug("检测到已增强的内容，跳过重复处理")
+            # 1. 检查是否需要增强
+            if not self._should_enhance_context(event, request):
                 return
 
-            if not self.is_chat_enabled(event):
-                logger.debug("上下文增强器：当前聊天未启用，跳过增强")
-                return
-
-            if event.get_message_type() != MessageType.GROUP_MESSAGE:
-                return
-
-            logger.debug("开始构建简单上下文...")
-
-            # 标记当前消息为LLM触发类型
-            await self._mark_current_as_llm_triggered(event)
-
-            # 获取群聊历史
-            group_id = (
-                event.get_group_id()
-                if hasattr(event, "get_group_id")
-                else event.unified_msg_origin
-            )
-            buffer = self._get_group_buffer(group_id)
-
+            # 2. 获取群聊历史记录
+            group_id = event.get_group_id() or event.unified_msg_origin
+            buffer = await self._get_group_buffer(group_id)
             if not buffer:
                 logger.debug("没有群聊历史，跳过增强")
                 return
 
-            # 【重构】从 buffer 提取消息和图片
-            extracted_data = self._extract_messages_for_context(buffer)
+            # 3. 确定场景（被动回复 vs 主动发言）
+            triggering_message, scene = self._find_triggering_message_from_event(buffer, event)
 
-            # 格式化 prompt
-            enhanced_prompt = self._format_prompt_from_messages(
-                original_prompt=request.prompt,
-                event=event,
-                recent_chats=extracted_data["recent_chats"],
-                bot_replies=extracted_data["bot_replies"],
+            # 4. 构建上下文增强内容
+            context_enhancement, image_urls = self._build_context_enhancement(
+                buffer, request.prompt, triggering_message, scene
             )
 
-            if enhanced_prompt and enhanced_prompt != request.prompt:
-                request.prompt = enhanced_prompt
-                logger.debug(f"上下文增强完成，新prompt长度: {len(enhanced_prompt)}")
-
-            # 根据配置截取最终的图片 URL 列表
-            max_images = self.config.max_images_in_context
-            final_image_urls = list(dict.fromkeys(extracted_data["image_urls"]))[
-                -max_images:
-            ]
-
-            if final_image_urls:
-                if not request.image_urls:
-                    request.image_urls = []
-                # 合并并去重
-                request.image_urls = list(
-                    dict.fromkeys(final_image_urls + request.image_urls)
-                )
-                logger.debug(f"上下文中新增了 {len(final_image_urls)} 张图片")
+            # 5. 将上下文注入到请求中
+            self._inject_context_into_request(request, context_enhancement, image_urls)
 
         except Exception as e:
             logger.error(f"上下文增强时发生错误: {e}")
+            logger.error(traceback.format_exc())
+
+    def _should_enhance_context(self, event: AstrMessageEvent, request: ProviderRequest) -> bool:
+        """检查是否应执行上下文增强"""
+        # 避免重复增强
+        if hasattr(request, '_context_enhanced'):
+            logger.debug("检测到已增强的请求，跳过重复处理")
+            return False
+
+        # 检查群聊是否启用
+        if not self.is_chat_enabled(event):
+            logger.debug("上下文增强器：当前聊天未启用，跳过增强")
+            return False
+
+        # 只处理群聊消息
+        if event.get_message_type() != MessageType.GROUP_MESSAGE:
+            return False
+
+        return True
 
     def _extract_messages_for_context(self, buffer: deque) -> dict:
         """从消息缓冲区中提取和筛选数据"""
@@ -662,7 +669,11 @@ class ContextEnhancerV2(Star):
                     ContextMessageType.IMAGE_MESSAGE,
                 ]
             ):
-                text_part = f"{msg.sender_name}: {msg.text_content}"
+                # 强化输入净化
+                safe_sender_name = msg.sender_name.replace("\n", " ")
+                safe_text_content = msg.text_content.replace("\n", " ")
+
+                text_part = f"{safe_sender_name}: {safe_text_content}"
                 caption_part = ""
                 if msg.image_captions:
                     # 在格式化输出时动态添加前缀
@@ -700,22 +711,85 @@ class ContextEnhancerV2(Star):
             "image_urls": image_urls,
         }
 
-    def _format_prompt_from_messages(
+    def _build_context_enhancement(
         self,
+        buffer: deque,
         original_prompt: str,
-        event: AstrMessageEvent,
-        recent_chats: list,
-        bot_replies: list,
-    ) -> str:
-        """将提取出的数据格式化为最终的 prompt 字符串"""
-        context_parts = [ContextConstants.PROMPT_HEADER]
+        triggering_message: Optional[GroupMessage],
+        scene: str,
+    ) -> tuple[str, list[str]]:
+        """
+        构建要追加到原始提示词的增强内容。
+        返回 (增强内容字符串, 图片URL列表)。
+        """
+        extracted_data = self._extract_messages_for_context(buffer)
 
-        context_parts.extend(self._format_recent_chats_section(recent_chats))
-        context_parts.extend(self._format_bot_replies_section(bot_replies))
-        context_parts.append(self._format_situation_section(original_prompt, event))
-        context_parts.append(ContextConstants.PROMPT_FOOTER)
+        # 构建历史聊天记录部分
+        history_parts = [ContextConstants.PROMPT_HEADER]
+        history_parts.extend(self._format_recent_chats_section(extracted_data["recent_chats"]))
+        history_parts.extend(self._format_bot_replies_section(extracted_data["bot_replies"]))
+        context_str = "\n".join(part for part in history_parts if part)
 
-        return "\n".join(part for part in context_parts if part)
+        # 根据场景选择并格式化指令
+        instruction_prompt = self._format_situation_instruction(
+            original_prompt, triggering_message, scene
+        )
+
+        # 组合成最终的增强内容
+        final_enhancement = f"{context_str}\n\n{instruction_prompt}"
+        
+        return final_enhancement, extracted_data["image_urls"]
+
+    def _inject_context_into_request(
+        self, request: ProviderRequest, context_enhancement: str, image_urls: list[str]
+    ):
+        """将生成的增强内容追加到 ProviderRequest 对象的末尾"""
+        if context_enhancement:
+            # 核心逻辑：追加内容，而不是替换
+            request.prompt = f"{request.prompt}\n\n{context_enhancement}"
+            setattr(request, '_context_enhanced', True) # 设置标志位
+            logger.debug(f"上下文追加完成，新prompt长度: {len(request.prompt)}")
+
+        if image_urls:
+            max_images = self.config.max_images_in_context
+            # 去重并限制数量
+            final_image_urls = list(dict.fromkeys(image_urls))[-max_images:]
+
+            if not request.image_urls:
+                request.image_urls = []
+            
+            # 合并并去重，确保新图片在前
+            request.image_urls = list(
+                dict.fromkeys(final_image_urls + request.image_urls)
+            )
+            logger.debug(f"上下文中合并了 {len(final_image_urls)} 张图片")
+
+    def _find_triggering_message_from_event(self, buffer: deque, llm_request_event: AstrMessageEvent) -> tuple[Optional[GroupMessage], str]:
+        """
+        在 on_llm_request 事件中，根据 nonce 精确查找触发 LLM 调用的消息，并判断场景。
+
+        返回:
+            一个元组 (触发消息对象, 场景字符串)
+            - (message, "被动回复"): 如果找到了匹配的 nonce
+            - (None, "主动发言"): 如果 llm_request_event 上没有 nonce，或没找到匹配
+        """
+        # 1. 从 llm_request_event 事件对象中直接获取之前设置的 nonce 值
+        nonce = getattr(llm_request_event, '_context_enhancer_nonce', None)
+
+        # 2. 如果 nonce 不存在，直接返回 "主动发言"
+        if not nonce:
+            logger.debug("事件中未找到 nonce，判定为'主动发言'")
+            return None, "主动发言"
+
+        # 3. 遍历 buffer 查找匹配的 nonce
+        for message in reversed(buffer):
+            if message.nonce == nonce:
+                logger.debug(f"通过 nonce 成功匹配到触发消息，判定为'被动回复'")
+                return message, "被动回复"
+
+        # 4. 如果遍历完 buffer 仍未找到，返回 "主动发言"
+        logger.warning(f"持有 nonce 但在缓冲区中未找到匹配消息，判定为'主动发言'")
+        return None, "主动发言"
 
     def _format_recent_chats_section(self, recent_chats: list) -> list:
         """格式化最近的聊天记录部分"""
@@ -729,18 +803,24 @@ class ContextEnhancerV2(Star):
             return []
         return [ContextConstants.BOT_REPLIES_HEADER] + bot_replies
 
-    def _format_situation_section(self, original_prompt: str, event: AstrMessageEvent) -> str:
-        """格式化当前情景部分"""
-        sender_id = event.get_sender_id()
-        if sender_id:
-            sender_name = event.get_sender_name() or "用户"
-            return ContextConstants.USER_TRIGGER_TEMPLATE.format(
-                sender_name=sender_name,
-                sender_id=sender_id,
+    def _format_situation_instruction(
+        self,
+        original_prompt: str,
+        triggering_message: Optional[GroupMessage],
+        scenario: str,
+    ) -> str:
+        """根据场景格式化指令性提示词"""
+        if scenario == "被动回复" and triggering_message:
+            instruction = self.config.passive_reply_instruction
+            return instruction.format(
+                sender_name=triggering_message.sender_name,
+                sender_id=triggering_message.sender_id,
                 original_prompt=original_prompt,
             )
         else:
-            return ContextConstants.PROACTIVE_TRIGGER_TEMPLATE.format(
+            # 默认为主动发言
+            instruction = self.config.active_speech_instruction
+            return instruction.format(
                 original_prompt=original_prompt
             )
 
@@ -773,7 +853,7 @@ class ContextEnhancerV2(Star):
                     text_content=response_text[:1000]
                 )
 
-                buffer = self._get_group_buffer(group_id)
+                buffer = await self._get_group_buffer(group_id)
                 buffer.append(bot_reply)
 
                 logger.debug(f"记录机器人回复: {response_text[:50]}...")
@@ -789,24 +869,16 @@ class ContextEnhancerV2(Star):
         """
         try:
             if group_id:
-                # 清空特定群组的缓存
-                if group_id in self.group_messages:
-                    del self.group_messages[group_id]
-                    logger.info(f"已清空群组 {group_id} 的内存上下文缓存。")
+                async with self._global_lock:
+                    self.group_messages.pop(group_id, None)
+                logger.info(f"已清空群组 {group_id} 的内存上下文缓存。")
                 if group_id in self.group_last_activity:
                     del self.group_last_activity[group_id]
-                
-                # 注意：文件缓存的原子性更新将在插件终止时统一处理
-                # 这里可以选择立即重写文件，但为了性能和一致性，依赖于正常关闭流程
-                logger.info(f"群组 {group_id} 的文件缓存将在下次保存时更新。")
-
             else:
-                # 清空所有缓存
-                logger.info(f"[诊断] 清空前 group_messages 包含 {len(self.group_messages)} 个群组。")
-                self.group_messages.clear()
+                async with self._global_lock:
+                    self.group_messages.clear()
                 self.group_last_activity.clear()
                 logger.info("内存中的所有上下文缓存已清空。")
-
                 if os.path.exists(self.cache_path):
                     await aio_remove(self.cache_path)
                     logger.info(f"持久化缓存文件 {self.cache_path} 已异步删除。")
@@ -823,37 +895,3 @@ class ContextEnhancerV2(Star):
             await self.clear_context_cache(group_id=group_id)
         else:
             logger.warning("无法获取 group_id，无法执行定向清空操作。")
-
-    async def _mark_current_as_llm_triggered(self, event: AstrMessageEvent):
-        """将当前消息标记为LLM触发类型（增强版）"""
-        if event.get_message_type() != MessageType.GROUP_MESSAGE:
-            return
-
-        group_id = event.get_group_id() or event.unified_msg_origin
-        buffer = self._get_group_buffer(group_id)
-        
-        # 定义一个较小的、固定的搜索窗口以优化性能
-        search_window = list(buffer)[-20:]
-
-        # 优先使用消息ID进行精确匹配
-        msg_id = getattr(event, 'id', None) or getattr(event.message_obj, 'id', None)
-        if msg_id:
-            for msg in reversed(search_window):
-                if getattr(msg, 'id', None) == msg_id:
-                    msg.message_type = ContextMessageType.LLM_TRIGGERED
-                    logger.debug(f"通过消息ID标记为LLM触发: {msg.text_content[:50]}...")
-                    return
-
-        # 其次，使用 nonce 进行精确匹配
-        nonce = getattr(event, '_context_enhancer_nonce', None)
-        if nonce:
-            for msg in reversed(search_window):
-                if msg.nonce == nonce:
-                    msg.message_type = ContextMessageType.LLM_TRIGGERED
-                    logger.debug(f"通过 nonce 标记为LLM触发: {msg.text_content[:50]}...")
-                    return
-        
-        # 如果两种精确匹配都失败，则记录并放弃
-        logger.warning(
-            "无法通过消息ID或nonce找到要标记的消息，放弃标记。这可能发生在消息处理延迟或状态不一致时。"
-        )

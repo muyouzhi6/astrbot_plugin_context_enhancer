@@ -5,17 +5,19 @@
         "hint": "空列表表示对所有群生效，否则只对指定群生效",
         "default": []
     },
-    "recent_chat_count": {
+    "recent_chats_count": {
         "description": "上下文包含的最近聊天记录数量",
         "type": "int",
         "hint": "用于构建上下文的聊天消息总数（包括普通、图片和触发类消息）",
-        "default": 15
+        "default": 15,
+        "minimum": 1
     },
-    "bot_reply_count": {
+    "bot_replies_count": {
         "description": "上下文包含的机器人回复数量",
         "type": "int",
         "hint": "最多收集多少条机器人自己的回复消息",
-        "default": 5
+        "default": 5,
+        "minimum": 0
     },
     "enable_image_caption": {
         "description": "是否为图片生成描述文本",
@@ -39,7 +41,8 @@
         "description": "上下文中包含的最大图片数量",
         "type": "int",
         "hint": "向LLM请求时，上下文中最多包含多少张图片",
-        "default": 4
+        "default": 4,
+        "minimum": 0
     },
     "collect_bot_replies": {
         "description": "是否收集机器人自身的回复",
@@ -51,13 +54,15 @@
         "description": "不活跃群组缓存清理天数",
         "type": "int",
         "hint": "一个群组如果连续N天没有消息，将自动清理其上下文缓存以节省内存",
-        "default": 7
+        "default": 7,
+        "minimum": 1
     },
     "cleanup_interval_seconds": {
         "description": "缓存清理检查间隔（秒）",
         "type": "int",
         "hint": "每隔多少秒检查一次是否有不活跃的群组需要清理",
-        "default": 600
+        "default": 600,
+        "minimum": 1
     },
     "command_prefixes": {
         "description": "触发LLM回复的命令前缀",
@@ -69,12 +74,26 @@
         "description": "消息去重检查窗口大小（条数）",
         "type": "int",
         "hint": "在判断新消息是否重复时，向前追溯检查的消息数量",
-        "default": 5
+        "default": 5,
+        "minimum": 1
     },
     "duplicate_check_time_seconds": {
         "description": "消息去重时间窗口（秒）",
         "type": "int",
         "hint": "在判断新消息是否重复时，两条消息时间戳在此秒数内才被视为可能重复",
-        "default": 30
+        "default": 30,
+        "minimum": 1
+    },
+    "passive_reply_instruction": {
+        "description": "指令：当用户@机器人或使用命令时，附加在上下文末尾的指令。",
+        "type": "string",
+        "hint": "告诉LLM这是对用户直接请求的被动回复。变量: {sender_name}, {sender_id}, {original_prompt}",
+        "default": "现在，群成员 {sender_name} (ID: {sender_id}) 正在对你说话，或者提到了你，TA说：\"{original_prompt}\"\n你需要根据以上聊天记录和你的角色设定，直接回复该用户。"
+    },
+    "active_speech_instruction": {
+        "description": "指令：当机器人决定主动发言时（如被其他插件触发），附加在上下文末尾的指令。",
+        "type": "string",
+        "hint": "告诉LLM这是它观察对话后进行的主动插话。变量: {original_prompt}",
+        "default": "以上是最近的聊天记录。现在，你决定主动参与讨论，并想就以下内容发表你的看法：\"{original_prompt}\"\n你需要根据以上聊天记录和你的角色设定，自然地切入对话。"
     }
 }
