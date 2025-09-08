@@ -58,5 +58,23 @@
         "type": "int",
         "hint": "每隔多少秒检查一次是否有不活跃的群组需要清理",
         "default": 600
+    },
+    "command_prefixes": {
+        "description": "触发LLM回复的命令前缀",
+        "type": "list",
+        "hint": "当消息以此列表中的任何前缀开头时，将被视为触发LLM的命令",
+        "default": ["/", "!", "！", "#", ".", "。"]
+    },
+    "duplicate_check_window_messages": {
+        "description": "消息去重检查窗口大小（条数）",
+        "type": "int",
+        "hint": "在判断新消息是否重复时，向前追溯检查的消息数量",
+        "default": 5
+    },
+    "duplicate_check_time_seconds": {
+        "description": "消息去重时间窗口（秒）",
+        "type": "int",
+        "hint": "在判断新消息是否重复时，两条消息时间戳在此秒数内才被视为可能重复",
+        "default": 30
     }
 }

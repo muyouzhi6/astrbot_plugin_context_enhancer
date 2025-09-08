@@ -103,9 +103,6 @@ class ImageCaptionUtils:
                 except (aiohttp.ClientError, asyncio.TimeoutError) as e:
                     logger.error(f"下载图片失败: {image}, 错误: {e}")
                     return None
-                except Exception as e:
-                    logger.error(f"下载图片时发生未知错误: {image}, 错误: {e}")
-                    return None
             else:
                 try:
                     # 假定为本地文件路径
@@ -114,8 +111,8 @@ class ImageCaptionUtils:
                 except FileNotFoundError:
                     logger.error(f"图片文件未找到: {image}")
                     return None
-                except Exception as e:
-                    logger.error(f"读取图片文件失败: {image}, 错误: {e}")
+                except (IOError, PermissionError) as e:
+                    logger.error(f"读取图片文件时发生权限或IO错误: {image}, 错误: {e}")
                     return None
         else:
             logger.error(f"无效的图片输入源: {type(image)}")
@@ -126,8 +123,10 @@ class ImageCaptionUtils:
 
         # 2. 计算哈希并检查缓存
         image_hash = self._get_image_hash(image_bytes)
-        # 缓存键包含图片内容哈希、自定义提示和提供商ID，以确保结果的唯一性
-        cache_key = (image_hash, custom_prompt, provider_id)
+        provider = self._get_llm_provider(provider_id)
+        model_id = getattr(provider, 'model_id', 'default_model')
+        # 缓存键包含图片内容哈希、自定义提示、提供商ID和模型ID，以确保结果的绝对唯一性
+        cache_key = (image_hash, custom_prompt, provider_id, model_id)
 
         async with self._cache_lock:
             if cache_key in self._caption_cache:
@@ -136,7 +135,6 @@ class ImageCaptionUtils:
                 return self._caption_cache[cache_key]
 
         # 3. 如果缓存未命中，则调用LLM
-        provider = self._get_llm_provider(provider_id)
         if not provider:
             logger.warning("无法获取任何可用的LLM提供商")
             return None
@@ -171,7 +169,4 @@ class ImageCaptionUtils:
             return None
         except aiohttp.ClientError as e:
             logger.error(f"图片转述LLM请求失败 (网络错误): {e}")
-            return None
-        except Exception as e:
-            logger.error(f"图片转述LLM请求失败 (未知错误): {e}")
             return None

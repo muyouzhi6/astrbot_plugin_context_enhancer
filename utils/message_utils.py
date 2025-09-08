@@ -104,9 +104,15 @@ class MessageUtils:
         try:
             caption = await self.image_caption_utils.generate_image_caption(image_url)
             return f"[图片: {caption}]" if caption else "[图片]"
+        except FileNotFoundError:
+            logger.debug(f"图片文件未找到: {image_url}")
+            return "[图片: 文件未找到]"
+        except (IOError, PermissionError) as e:
+            logger.debug(f"读取图片文件时发生IO错误或权限错误: {e}")
+            return "[图片: 读取失败]"
         except Exception as e:
-            logger.debug(f"生成图片描述失败: {e}")
-            return "[图片]"
+            logger.debug(f"生成图片描述时发生未知错误: {e}")
+            return "[图片: 处理异常]"
 
     def _handle_face_component(self, component: Face) -> str:
         return f"[表情:{component.id}]"

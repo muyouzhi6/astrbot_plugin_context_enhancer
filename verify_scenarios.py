@@ -50,10 +50,16 @@ class MockEvent(MagicMock):
 
 # --- 测试用例 ---
 
-@patch('astrabot.api', MagicMock())
+# 使用 patch.dict 来模拟 sys.modules，避免 ModuleNotFoundError
+@patch.dict('sys.modules', {
+    'astrabot': MagicMock(),
+    'astrabot.api': MagicMock(),
+    'astrabot.api.provider': MagicMock(),
+    'astrabot.api.platform': MagicMock(),
+})
 class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        """在每个测试前运行"""
+    async def asyncSetUp(self):
+        """在每个测试前异步运行"""
         logger.info(f"\n--- Running test: {self._testMethodName} ---")
         # 模拟 Context 对象
         mock_context = MagicMock()
@@ -61,21 +67,32 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
 
         # 模拟配置的 get 方法
         def mock_get(key, default=None):
+            if key == "command_prefixes":
+                return ["/", "!", "！", "#", ".", "。", "reset", "new"]
             return default
         mock_config.get.side_effect = mock_get
         
         # 实例化插件
         self.plugin = ContextEnhancerV2(mock_context, mock_config)
+        # 异步初始化
+        await self.plugin._async_init()
         
         # 清空并预置聊天缓存
         self.plugin.group_messages = {}
         buffer = self.plugin._get_group_buffer("test_group_123")
         
         # 模拟一些历史消息
+        mock_sender_past = MockSender("10001", "张三")
         mock_event_past = MockEvent()
-        mock_event_past.message_obj = MockMessage(MockSender("10001", "张三"), [MockPlain("今天天气不错")])
+        mock_event_past.message_obj = MockMessage(mock_sender_past, [MockPlain("今天天气不错")])
         
-        past_msg = GroupMessage.from_event(mock_event_past, ContextMessageType.NORMAL_CHAT)
+        past_msg = GroupMessage(
+            message_type=ContextMessageType.NORMAL_CHAT,
+            sender_id=mock_sender_past.user_id,
+            sender_name=mock_sender_past.nickname,
+            group_id="test_group_123",
+            text_content="今天天气不错"
+        )
         buffer.append(past_msg)
 
     async def test_passive_user_trigger_scenario(self):
@@ -99,7 +116,7 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         self.assertIn("现在 李四（ID: 10002）发了一个消息", final_prompt, "Prompt 应该包含用户触发信息")
         self.assertNotIn("主动就以下内容发表观点", final_prompt, "Prompt 不应该包含主动触发信息")
         
-        logger.info("✅ Test Passed: 被动回复场景按预期工作。")
+        logger.info("Test Passed: 被动回复场景按预期工作。")
 
     async def test_proactive_system_trigger_scenario(self):
         """测试场景二：系统主动触发"""
@@ -122,7 +139,55 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         self.assertIn("主动就以下内容发表观点: 播报一则晚间新闻", final_prompt, "Prompt 应该包含主动触发信息")
         self.assertNotIn("发了一个消息", final_prompt, "Prompt 不应该包含用户触发信息")
 
-        logger.info("✅ Test Passed: 主动回复场景按预期工作。")
+        logger.info("Test Passed: 主动回复场景按预期工作。")
+
+    async def test_reset_command_isolates_groups(self):
+        """测试`reset`指令只影响当前群组，不影响其他群组。"""
+        logger.info("Step 1: 为两个不同的群组 group_A 和 group_B 添加消息")
+        
+        # 为 group_A 添加消息
+        self.plugin._get_group_buffer("group_A").append(GroupMessage(
+            message_type=ContextMessageType.NORMAL_CHAT,
+            sender_id="user_A",
+            sender_name="UserA",
+            group_id="group_A",
+            text_content="Message in group A"
+        ))
+        
+        # 为 group_B 添加消息
+        self.plugin._get_group_buffer("group_B").append(GroupMessage(
+            message_type=ContextMessageType.NORMAL_CHAT,
+            sender_id="user_B",
+            sender_name="UserB",
+            group_id="group_B",
+            text_content="Message in group B"
+        ))
+
+        # 断言两个群组都有消息
+        self.assertEqual(len(self.plugin.group_messages["group_A"]), 1)
+        self.assertEqual(len(self.plugin.group_messages["group_B"]), 1)
+
+        logger.info("Step 2: 模拟在 group_A 中执行 reset 指令")
+        # 构造一个模拟的 Event，代表来自 group_A 的 reset 请求
+        mock_event_A = MockEvent()
+        # 使用 patch 来临时修改 get_group_id 的返回值
+        with patch.object(mock_event_A, 'get_group_id', return_value='group_A'):
+            # 模拟用户发送 "reset" 指令
+            mock_event_A.message_obj = MockMessage(MockSender("user_reset", "Resetter"), [MockPlain("reset")])
+            mock_event_A.message_str = "reset" # 确保 message_str 也被设置
+            
+            # 调用 on_message 方法处理指令
+            await self.plugin.on_message(mock_event_A)
+
+        logger.info("Step 3: 验证 group_A 的上下文是否被清空")
+        self.assertNotIn("group_A", self.plugin.group_messages, "group_A 的上下文应该被清空")
+
+        logger.info("Step 4: 验证 group_B 的上下文是否保持不变")
+        self.assertIn("group_B", self.plugin.group_messages, "group_B 的上下文应该仍然存在")
+        self.assertEqual(len(self.plugin.group_messages["group_B"]), 1, "group_B 的消息数量应该保持不变")
+        self.assertEqual(self.plugin.group_messages["group_B"][0].text_content, "Message in group B")
+
+        logger.info("Test Passed: `reset` 指令成功隔离了群组上下文。")
 
 if __name__ == "__main__":
     unittest.main()

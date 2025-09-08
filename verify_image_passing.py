@@ -11,6 +11,7 @@ from astrbot.api.platform import MessageType
 
 # 导入被测试的插件类
 from main import ContextEnhancerV2, GroupMessage, ContextMessageType
+from utils.image_caption import ImageCaptionUtils
 
 class MockMessageComponent:
     def __init__(self, type, data):
@@ -65,9 +66,14 @@ class MockProviderRequest:
         self.prompt = prompt
         self.image_urls = []
 
-@patch('astrabot.api', MagicMock())
+@patch.dict('sys.modules', {
+    'astrabot': MagicMock(),
+    'astrabot.api': MagicMock(),
+    'astrabot.api.provider': MagicMock(),
+    'astrabot.api.platform': MagicMock(),
+})
 class TestImagePassing(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
+    async def asyncSetUp(self):
         # 创建 mock 对象
         self.mock_context = MagicMock()
         mock_config = MagicMock()
@@ -80,6 +86,7 @@ class TestImagePassing(unittest.IsolatedAsyncioTestCase):
                 "机器人回复数量": 5,
                 "上下文图片最大数量": 4,
                 "启用图片描述": True,
+                "command_prefixes": ["/"],
             }
             return configs.get(key, default)
         
@@ -88,6 +95,7 @@ class TestImagePassing(unittest.IsolatedAsyncioTestCase):
 
         # 实例化被测试的插件
         self.plugin = ContextEnhancerV2(self.mock_context, mock_config)
+        await self.plugin._async_init()
 
         # 模拟 utils (避免真实的网络请求)
         self.plugin.image_caption_utils = MagicMock()
@@ -102,7 +110,14 @@ class TestImagePassing(unittest.IsolatedAsyncioTestCase):
 
         # 1. 模拟历史消息：发送一张图片
         image_event = MockAstrMessageEvent(sender, [MockImage(image_url)], group_id)
-        image_msg = GroupMessage.from_event(cast("AstrMessageEvent", image_event), ContextMessageType.IMAGE_MESSAGE)
+        image_msg = GroupMessage(
+            message_type=ContextMessageType.IMAGE_MESSAGE,
+            sender_id=sender.user_id,
+            sender_name=sender.nickname,
+            group_id=group_id,
+            text_content="",
+            images=[MockImage(image_url)]
+        )
 
         # 手动生成图片描述
         await self.plugin._generate_image_captions(image_msg)
@@ -127,6 +142,69 @@ class TestImagePassing(unittest.IsolatedAsyncioTestCase):
         
         # 检查 image_urls 是否包含原始图片 URL
         self.assertIn(image_url, request.image_urls)
+
+
+# 使用 patch.dict 来模拟 sys.modules，避免 ModuleNotFoundError
+@patch.dict('sys.modules', {
+    'astrabot': MagicMock(),
+    'astrabot.api': MagicMock(),
+})
+class TestImageCaptionCache(unittest.IsolatedAsyncioTestCase):
+    
+    async def asyncSetUp(self):
+        """在每个测试前异步运行"""
+        self.mock_context = MagicMock()
+        self.mock_config = MagicMock()
+        
+        # 模拟LLM Provider
+        self.mock_provider1 = MagicMock()
+        self.mock_provider1.model_id = "gpt-4o"
+        self.mock_provider1.text_chat = AsyncMock(return_value=MagicMock(completion_text="Caption from gpt-4o"))
+
+        self.mock_provider2 = MagicMock()
+        self.mock_provider2.model_id = "gpt-4-turbo"
+        self.mock_provider2.text_chat = AsyncMock(return_value=MagicMock(completion_text="Caption from gpt-4-turbo"))
+
+        def get_provider_by_id(provider_id):
+            if provider_id == "provider_1":
+                return self.mock_provider1
+            if provider_id == "provider_2":
+                return self.mock_provider2
+            return None
+        
+        self.mock_context.get_provider_by_id.side_effect = get_provider_by_id
+
+        # 实例化一个真实的 ImageCaptionUtils
+        self.image_utils = ImageCaptionUtils(self.mock_context, self.mock_config)
+
+    async def asyncTearDown(self):
+        """在每个测试后运行，关闭 aiohttp session"""
+        await self.image_utils.close()
+
+    async def test_cache_differentiates_by_model_id(self):
+        """测试缓存键是否能正确区分不同的 model_id"""
+        image_bytes = b"dummy_image_bytes" # 使用虚拟的图片内容
+
+        # 第一次调用，使用 provider_1 (gpt-4o)
+        caption1 = await self.image_utils.generate_image_caption(image_bytes, provider_id="provider_1")
+        self.assertEqual(caption1, "Caption from gpt-4o")
+        self.mock_provider1.text_chat.assert_called_once()
+        self.mock_provider2.text_chat.assert_not_called()
+
+        # 第二次调用，使用相同的图片，但 provider_2 (gpt-4-turbo)
+        # 由于 model_id 不同，缓存不应命中，应触发第二次真实调用
+        caption2 = await self.image_utils.generate_image_caption(image_bytes, provider_id="provider_2")
+        self.assertEqual(caption2, "Caption from gpt-4-turbo")
+        self.mock_provider1.text_chat.assert_called_once() # 第一次的调用
+        self.mock_provider2.text_chat.assert_called_once() # 第二次的调用
+
+        # 第三次调用，再次使用 provider_1，这次应该命中缓存
+        caption3 = await self.image_utils.generate_image_caption(image_bytes, provider_id="provider_1")
+        self.assertEqual(caption3, "Caption from gpt-4o")
+        # 断言 text_chat 的调用次数没有增加
+        self.mock_provider1.text_chat.assert_called_once()
+        self.mock_provider2.text_chat.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

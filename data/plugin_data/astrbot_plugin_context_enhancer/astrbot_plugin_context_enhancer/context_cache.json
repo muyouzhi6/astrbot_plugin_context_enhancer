@@ -1,0 +1,17 @@
+{
+    "group1": [
+        {
+            "id": "msg6",
+            "nonce": null,
+            "message_type": "normal_chat",
+            "timestamp": "2025-09-08T13:09:19.057952",
+            "sender_name": "User_user1",
+            "sender_id": "user1",
+            "group_id": "group1",
+            "text_content": "大家好",
+            "has_image": false,
+            "image_captions": [],
+            "image_urls": []
+        }
+    ]
+}
