@@ -30,11 +30,15 @@ class ImageCaptionUtils:
         self.session: Optional[aiohttp.ClientSession] = None
         self._caption_cache: OrderedDict = OrderedDict()
         self._cache_lock = asyncio.Lock()
+        self._session_lock = asyncio.Lock()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取 aiohttp ClientSession，如果不存在或已关闭则创建新的"""
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession()
+            async with self._session_lock:
+                # Double-check locking
+                if self.session is None or self.session.closed:
+                    self.session = aiohttp.ClientSession()
         return self.session
 
     async def close(self):

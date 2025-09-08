@@ -14,6 +14,7 @@ import uuid
 from dataclasses import dataclass
 import asyncio
 import aiofiles
+import aiofiles.os as aio_os
 from aiofiles.os import remove as aio_remove, rename as aio_rename
 
 from astrbot.api.event import filter as event_filter, AstrMessageEvent
@@ -205,7 +206,7 @@ class ContextEnhancerV2(Star):
             logger.error(f"异步保存上下文缓存失败: {e}")
         finally:
             # 3. 确保清理临时文件
-            if os.path.exists(temp_path):
+            if await aio_os.path.exists(temp_path):
                 try:
                     await aio_remove(temp_path)
                 except Exception as e:
@@ -254,7 +255,7 @@ class ContextEnhancerV2(Star):
 
     async def _load_cache_from_file(self):
         """从文件异步加载缓存"""
-        if not os.path.exists(self.cache_path):
+        if not await aio_os.path.exists(self.cache_path):
             return
         try:
             async with aiofiles.open(self.cache_path, "r", encoding="utf-8") as f:
@@ -459,7 +460,7 @@ class ContextEnhancerV2(Star):
             # 如果发送者ID等于机器人ID，则是机器人自己的消息
             return bool(bot_id and sender_id and str(sender_id) == str(bot_id))
         except (AttributeError, KeyError) as e:
-            logger.debug(f"检查机器人消息时出错（可能是不支持的事件类型或数据结构）: {e}")
+            logger.warning(f"检查机器人消息时出错（可能是不支持的事件类型或数据结构）: {e}")
             return False
 
     def _classify_message(self, event: AstrMessageEvent) -> str:
