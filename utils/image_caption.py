@@ -108,48 +108,36 @@ class ImageCaptionUtils:
         provider_id: Optional[str] = None,
         custom_prompt: Optional[str] = None,
     ) -> Optional[str]:
-        """为单张图片生成文字描述，并使用基于内容的共享LRU缓存。"""
-        image_bytes: Optional[bytes] = None
+        """
+        为单张图片生成文字描述。
+        借鉴 spectrecore 的实现，简化处理流程，将数据直接传递给 provider。
+        """
+        image_url: str
 
-        # 1. 获取图片字节流
+        # 1. 准备 image_url
         if isinstance(image, bytes):
-            image_bytes = image
+            # 如果是字节流，检测MIME类型并编码为Data URL
+            mime_type = self._get_image_mime_type(image)
+            if mime_type is None:
+                logger.warning("无法识别图片MIME类型，将默认使用 'image/jpeg'")
+                mime_type = 'image/jpeg'
+            image_url = f"data:{mime_type};base64,{base64.b64encode(image).decode()}"
         elif isinstance(image, str):
-            if image.startswith(('http://', 'https://')):
-                try:
-                    image_bytes = await self._download_image(image, timeout)
-                except (ClientError, TimeoutError) as e:
-                    logger.error(f"下载图片失败（已重试）: {image}, 错误: {e}")
-                    return None
-            else:
-                try:
-                    # 假定为本地文件路径
-                    async with aiofiles.open(image, "rb") as f:
-                        image_bytes = await f.read()
-                except FileNotFoundError:
-                    logger.error(f"图片文件未找到: {image}")
-                    return None
-                except (IOError, PermissionError) as e:
-                    logger.error(f"读取图片文件时发生权限或IO错误: {image}, 错误: {e}")
-                    return None
+            # 如果是字符串（URL或Data URL），直接使用
+            image_url = image
         else:
             logger.error(f"无效的图片输入源: {type(image)}")
             return None
 
-        if not image_bytes:
-            return None
-
-        # 2. 计算哈希并检查缓存
-        image_hash = self._get_image_hash(image_bytes)
+        # 2. 检查缓存 (使用 image_url 作为 key)
         provider = self._get_llm_provider(provider_id)
         model_id = getattr(provider, 'model_id', 'default_model')
-        # 缓存键包含图片内容哈希、自定义提示、提供商ID和模型ID，以确保结果的绝对唯一性
-        cache_key = (image_hash, custom_prompt, provider_id, model_id)
+        cache_key = (image_url, custom_prompt, provider_id, model_id)
 
         async with self._cache_lock:
             if cache_key in self._caption_cache:
-                # 将命中的项目移到末尾（LRU行为）
                 self._caption_cache.move_to_end(cache_key)
+                logger.debug(f"命中图片描述缓存: {image_url[:100]}...")
                 return self._caption_cache[cache_key]
 
         # 3. 如果缓存未命中，则调用LLM
@@ -159,12 +147,10 @@ class ImageCaptionUtils:
 
         prompt = custom_prompt or self.config.get("image_caption_prompt", "请直接简短描述这张图片")
 
-        mime_type = self._get_image_mime_type(image_bytes)
-        if mime_type is None:
-            logger.debug("无法识别图片MIME类型，将默认使用 'image/jpeg'")
-            mime_type = 'image/jpeg'
-
-        image_url = f"data:{mime_type};base64,{base64.b64encode(image_bytes).decode()}"
+        logger.debug(f"准备调用LLM进行图片描述...")
+        logger.debug(f"  - Provider: {provider_id or '默认'}")
+        logger.debug(f"  - Prompt: '{prompt}'")
+        logger.debug(f"  - Image URL: '{image_url[:100]}...'")
 
         caption = await self._caption_image_with_provider(provider, prompt, [image_url], timeout)
 
@@ -172,10 +158,10 @@ class ImageCaptionUtils:
         if caption:
             async with self._cache_lock:
                 if len(self._caption_cache) >= CACHE_MAX_SIZE:
-                    # 移除最久未使用的项目
                     self._caption_cache.popitem(last=False)
                 self._caption_cache[cache_key] = caption
-        
+                logger.debug(f"缓存图片描述: {image_url[:100]}... -> {caption}")
+
         return caption
 
     @retry(

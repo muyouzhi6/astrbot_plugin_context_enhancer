@@ -37,7 +37,13 @@
         "hint": "用于生成图片描述的提示词",
         "default": "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息"
     },
-    "max_context_images": {
+    "image_caption_timeout": {
+      "type": "int",
+      "title": "图像转述超时秒数",
+      "description": "调用大语言模型进行图像内容描述时的超时时间（秒）。",
+      "default": 30
+    },
+    "max_images_in_context": {
         "description": "上下文中包含的最大图片数量",
         "type": "int",
         "hint": "向LLM请求时，上下文中最多包含多少张图片",

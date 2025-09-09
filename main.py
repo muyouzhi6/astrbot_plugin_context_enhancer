@@ -58,10 +58,12 @@ class PluginConfig:
     enabled_groups: list
     recent_chats_count: int
     bot_replies_count: int
+    collect_bot_replies: bool
     max_images_in_context: int
     enable_image_caption: bool
     image_caption_provider_id: str
     image_caption_prompt: str
+    image_caption_timeout: int
     cleanup_interval_seconds: int
     inactive_cleanup_days: int
     command_prefixes: list
@@ -69,6 +71,14 @@ class PluginConfig:
     duplicate_check_time_seconds: int
     passive_reply_instruction: str  # 被动回复指令
     active_speech_instruction: str  # 主动发言指令
+
+
+@dataclass
+class GroupMessageBuffers:
+    """为每个群组管理独立的、按类型划分的消息缓冲区"""
+    recent_chats: deque
+    bot_replies: deque
+    image_messages: deque
 
 
 class GroupMessage:
@@ -128,14 +138,7 @@ class GroupMessage:
         return instance
 
 
-
-
-@register(
-    "astrbot_plugin_context_enhancer",
-    "木有知",
-    "智能群聊上下文增强插件v2.0，提供强大的'读空气'功能。通过多维度信息收集和分层架构，为 LLM 提供丰富的群聊语境，支持角色扮演，完全兼容人设系统。",
-    "2.0.0",
-)
+@register("context_enhancer_v2", "木有知", "智能群聊上下文增强插件 v2", "2.0.0", repo="https://github.com/your_repo/astrbot_plugin_context_enhancer")
 class ContextEnhancerV2(Star):
     """
     AstrBot 上下文增强器 v2.0
@@ -168,7 +171,7 @@ class ContextEnhancerV2(Star):
         self._initialize_utils()
 
         # 群聊消息缓存 - 每个群独立存储
-        self.group_messages: Dict[str, deque[GroupMessage]] = {}
+        self.group_messages: Dict[str, "GroupMessageBuffers"] = {}
         self.group_locks: Dict[str, Lock] = {}
         self.group_last_activity: Dict[str, datetime.datetime] = {}
         self.last_cleanup_time = time.time()
@@ -192,13 +195,18 @@ class ContextEnhancerV2(Star):
         # 异步持久化上下文
         temp_path = self.cache_path + ".tmp"
         try:
-            serializable_messages = {}
-            for group_id, messages in self.group_messages.items():
-                serializable_messages[group_id] = [msg.to_dict() for msg in messages]
+            serializable_data = {}
+            for group_id, buffers in self.group_messages.items():
+                # 合并所有缓冲区的消息
+                all_messages = list(buffers.recent_chats) + list(buffers.bot_replies) + list(buffers.image_messages)
+                # 按时间戳排序
+                all_messages.sort(key=lambda msg: msg.timestamp)
+                # 序列化
+                serializable_data[group_id] = [msg.to_dict() for msg in all_messages]
 
             # 1. 写入临时文件
             async with aiofiles.open(temp_path, "w", encoding="utf-8") as f:
-                await f.write(json.dumps(serializable_messages, ensure_ascii=False, indent=4))
+                await f.write(json.dumps(serializable_data, ensure_ascii=False, indent=4))
 
             # 2. 原子性重命名
             await aio_rename(temp_path, self.cache_path)
@@ -222,15 +230,17 @@ class ContextEnhancerV2(Star):
     def _load_plugin_config(self) -> PluginConfig:
         """从原始配置加载并填充插件配置类"""
         return PluginConfig(
-            enabled_groups=self.raw_config.get("启用群组", []),
-            recent_chats_count=self.raw_config.get("最近聊天记录数量", 15),
-            bot_replies_count=self.raw_config.get("机器人回复数量", 5),
-            max_images_in_context=self.raw_config.get("上下文图片最大数量", 4),
-            enable_image_caption=self.raw_config.get("启用图片描述", True),
-            image_caption_provider_id=self.raw_config.get("图片描述提供商ID", ""),
+            enabled_groups=[str(g) for g in self.raw_config.get("enabled_groups", [])],
+            recent_chats_count=self.raw_config.get("recent_chats_count", 15),
+            bot_replies_count=self.raw_config.get("bot_replies_count", 5),
+            max_images_in_context=self.raw_config.get("max_context_images", 4),
+            collect_bot_replies=self.raw_config.get("collect_bot_replies", True),
+            enable_image_caption=self.raw_config.get("enable_image_caption", True),
+            image_caption_provider_id=self.raw_config.get("image_caption_provider_id", ""),
             image_caption_prompt=self.raw_config.get(
-                "图片描述提示词", "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息"
+                "image_caption_prompt", "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息"
             ),
+            image_caption_timeout=self.raw_config.get("image_caption_timeout", 30),
             cleanup_interval_seconds=self.raw_config.get("cleanup_interval_seconds", 600),
             inactive_cleanup_days=self.raw_config.get("inactive_cleanup_days", 7),
             command_prefixes=self.raw_config.get("command_prefixes", ["/", "!", "！", "#", ".", "。"]),
@@ -278,28 +288,40 @@ class ContextEnhancerV2(Star):
 
     def _load_group_messages_from_dict(
         self, data: Dict[str, list]
-    ) -> Dict[str, deque]:
-        """从字典加载群组消息"""
-        group_messages = {}
-
-        # 计算 maxlen
-        base_max_len = self.config.recent_chats_count + self.config.bot_replies_count
-        max_len = base_max_len * self.CACHE_LOAD_BUFFER_MULTIPLIER
+    ) -> Dict[str, "GroupMessageBuffers"]:
+        """从字典加载群组消息到新的多缓冲区结构"""
+        group_buffers_map = {}
 
         for group_id, msg_list in data.items():
-            # 为每个群组创建一个有最大长度限制的 deque
-            message_deque = deque(maxlen=max_len)
+            # 为每个群组创建独立的缓冲区
+            buffers = self._create_new_group_buffers()
+
             for msg_data in msg_list:
                 try:
-                    # 从字典重建 GroupMessage 对象
-                    message_deque.append(GroupMessage.from_dict(msg_data))
+                    msg = GroupMessage.from_dict(msg_data)
+                    # 根据消息类型和内容分发到对应的 deque
+                    if msg.message_type == ContextMessageType.BOT_REPLY:
+                        buffers.bot_replies.append(msg)
+                    elif msg.has_image:
+                        buffers.image_messages.append(msg)
+                    else:
+                        buffers.recent_chats.append(msg)
                 except Exception as e:
-                    logger.warning(f"从字典转换消息失败 (群 {group_id}): {e}")
-            group_messages[group_id] = message_deque
-        return group_messages
+                    logger.warning(f"从字典转换并分发消息失败 (群 {group_id}): {e}")
+            group_buffers_map[group_id] = buffers
+        return group_buffers_map
 
-    async def _get_group_buffer(self, group_id: str) -> deque:
-        """获取群聊的消息缓冲区，并管理内存"""
+    def _create_new_group_buffers(self) -> "GroupMessageBuffers":
+        """创建一个新的 GroupMessageBuffers 实例，并根据配置初始化 deques"""
+        # 为每个 deque 设置独立的 maxlen，并增加一定的缓冲空间
+        return GroupMessageBuffers(
+            recent_chats=deque(maxlen=self.config.recent_chats_count * self.CACHE_LOAD_BUFFER_MULTIPLIER),
+            bot_replies=deque(maxlen=self.config.bot_replies_count * self.CACHE_LOAD_BUFFER_MULTIPLIER),
+            image_messages=deque(maxlen=self.config.max_images_in_context * self.CACHE_LOAD_BUFFER_MULTIPLIER)
+        )
+
+    async def _get_or_create_group_buffers(self, group_id: str) -> "GroupMessageBuffers":
+        """获取或创建群聊的消息缓冲区集合"""
         current_dt = datetime.datetime.now()
 
         # 更新活动时间
@@ -315,8 +337,7 @@ class ContextEnhancerV2(Star):
             async with self._global_lock:
                 # 双重检查，防止在等待锁期间其他协程已创建
                 if group_id not in self.group_messages:
-                    max_len = (self.config.recent_chats_count + self.config.bot_replies_count) * self.CACHE_LOAD_BUFFER_MULTIPLIER
-                    self.group_messages[group_id] = deque(maxlen=max_len)
+                    self.group_messages[group_id] = self._create_new_group_buffers()
         return self.group_messages[group_id]
 
     def _cleanup_inactive_groups(self, current_time: datetime.datetime):
@@ -357,9 +378,12 @@ class ContextEnhancerV2(Star):
     @event_filter.platform_adapter_type(event_filter.PlatformAdapterType.ALL)
     async def on_message(self, event: AstrMessageEvent):
         """监听所有消息，进行分类和存储"""
-        if event.get_message_type() == MessageType.GROUP_MESSAGE and not event.get_group_id():
-            logger.warning("无法获取群组ID，已跳过上下文处理。")
+        start_time = time.monotonic()
+        group_id = event.get_group_id()
+        if event.get_message_type() == MessageType.GROUP_MESSAGE and not group_id:
+            logger.warning("事件缺少 group_id，无法处理。")
             return
+        
         try:
             if not self.is_chat_enabled(event):
                 return
@@ -376,6 +400,9 @@ class ContextEnhancerV2(Star):
         except Exception as e:
             logger.error(f"处理消息时发生错误: {e}")
             logger.error(traceback.format_exc())
+        finally:
+            duration = (time.monotonic() - start_time) * 1000
+            logger.debug(f"[Profiler] on_message took: {duration:.2f} ms")
 
     def _create_group_message_from_event(self, event: AstrMessageEvent, message_type: str) -> GroupMessage:
         """从事件创建 GroupMessage 实例"""
@@ -429,18 +456,27 @@ class ContextEnhancerV2(Star):
             message_type = self._classify_message(event)
             group_msg.message_type = message_type # 更新消息类型
 
-            # 生成图片描述
+            # 生成图片描述（作为后台任务）
             if group_msg.has_image and self.config.enable_image_caption:
-                await self._generate_image_captions(group_msg)
+                asyncio.create_task(self._generate_image_captions(group_msg))
 
-            # 添加到缓冲区前进行去重检查
-            buffer = await self._get_group_buffer(group_msg.group_id)
+            # 获取或创建该群组的缓冲区集合
+            buffers = await self._get_or_create_group_buffers(group_msg.group_id)
             lock = self._get_or_create_lock(group_msg.group_id)
 
             async with lock:
+                # 根据消息类型和内容，将其放入对应的 deque
+                target_deque = None
+                if message_type == ContextMessageType.BOT_REPLY:
+                    target_deque = buffers.bot_replies
+                elif group_msg.has_image:
+                    target_deque = buffers.image_messages
+                else: # NORMAL_CHAT or LLM_TRIGGERED
+                    target_deque = buffers.recent_chats
+
                 # 🚨 防重复机制：检查是否已存在相同消息
-                if not self._is_duplicate_message(buffer, group_msg):
-                    buffer.append(group_msg)
+                if not self._is_duplicate_message(target_deque, group_msg):
+                    target_deque.append(group_msg)
                     logger.debug(
                         f"收集群聊消息 [{message_type}]: {group_msg.sender_name} - {group_msg.text_content[:50]}..."
                     )
@@ -452,14 +488,14 @@ class ContextEnhancerV2(Star):
         except Exception as e:
             logger.error(f"处理群聊消息时发生错误: {e}")
 
-    def _is_duplicate_message(self, buffer: deque, new_msg: GroupMessage) -> bool:
-        """检查消息是否已存在于缓冲区（防重复）"""
+    def _is_duplicate_message(self, target_deque: deque, new_msg: GroupMessage) -> bool:
+        """检查消息是否已存在于目标缓冲区（防重复）"""
         # 如果新消息包含图片，则不视为重复，以确保图片总能被处理
         if new_msg.has_image:
             return False
             
         # 检查最近N条消息即可，避免性能问题
-        recent_messages = list(buffer)[-self.config.duplicate_check_window_messages:] if buffer else []
+        recent_messages = list(target_deque)[-self.config.duplicate_check_window_messages:] if target_deque else []
 
         for existing_msg in recent_messages:
             # 重复判断条件：
@@ -601,7 +637,7 @@ class ContextEnhancerV2(Star):
                         # 调用图片描述工具，传入特定的提供商ID和提示词
                         caption = await self.image_caption_utils.generate_image_caption(
                             image_data,
-                            timeout=10,
+                            timeout=self.config.image_caption_timeout,
                             provider_id=image_caption_provider_id
                             if image_caption_provider_id
                             else None,
@@ -633,8 +669,12 @@ class ContextEnhancerV2(Star):
         LLM请求时提供上下文增强。
         此方法作为总入口，协调上下文的构建和注入流程。
         """
-        if event.get_message_type() == MessageType.GROUP_MESSAGE and not event.get_group_id():
+        start_time = time.monotonic()
+        group_id = event.get_group_id()
+        if event.get_message_type() == MessageType.GROUP_MESSAGE and not group_id:
+            logger.warning(f"LLM 请求事件缺少 group_id，无法增强上下文。")
             return
+            
         try:
             # 1. 检查是否需要增强
             if not self._should_enhance_context(event, request):
@@ -642,20 +682,31 @@ class ContextEnhancerV2(Star):
 
             # 2. 获取群聊历史记录
             group_id = event.get_group_id()
-            buffer = await self._get_group_buffer(group_id)
-            if not buffer:
-                logger.debug("没有群聊历史，跳过增强")
+            buffers = await self._get_or_create_group_buffers(group_id)
+            if not any([buffers.recent_chats, buffers.bot_replies, buffers.image_messages]):
+                logger.debug("所有消息缓冲区都为空，跳过增强")
                 return
 
             # 3. 确定场景（被动回复 vs 主动发言）
             lock = self._get_or_create_lock(group_id)
             async with lock:
-                triggering_message, scene = self._find_triggering_message_from_event(buffer, event)
+                # 合并所有消息用于查找触发消息
+                collect_start = time.monotonic()
+                all_messages = list(buffers.recent_chats) + list(buffers.bot_replies) + list(buffers.image_messages)
+                logger.debug(f"[Profiler] Collecting messages from deque took: {(time.monotonic() - collect_start) * 1000:.2f} ms")
+
+                sort_start = time.monotonic()
+                all_messages.sort(key=lambda msg: msg.timestamp)
+                logger.debug(f"[Profiler] Sorting messages took: {(time.monotonic() - sort_start) * 1000:.2f} ms")
+
+                triggering_message, scene = self._find_triggering_message_from_event(all_messages, event)
 
                 # 4. 构建上下文增强内容
+                build_start = time.monotonic()
                 context_enhancement, image_urls = self._build_context_enhancement(
-                    buffer, request.prompt, triggering_message, scene
+                    all_messages, request.prompt, triggering_message, scene
                 )
+                logger.debug(f"[Profiler] _build_context_enhancement took: {(time.monotonic() - build_start) * 1000:.2f} ms")
 
             # 5. 将上下文注入到请求中
             self._inject_context_into_request(request, context_enhancement, image_urls)
@@ -663,6 +714,9 @@ class ContextEnhancerV2(Star):
         except Exception as e:
             logger.error(f"上下文增强时发生错误: {e}")
             logger.error(traceback.format_exc())
+        finally:
+            duration = (time.monotonic() - start_time) * 1000
+            logger.debug(f"[Profiler] on_llm_request took: {duration:.2f} ms")
 
     def _should_enhance_context(self, event: AstrMessageEvent, request: ProviderRequest) -> bool:
         """检查是否应执行上下文增强"""
@@ -682,8 +736,8 @@ class ContextEnhancerV2(Star):
 
         return True
 
-    def _extract_messages_for_context(self, buffer: deque) -> dict:
-        """从消息缓冲区中提取和筛选数据"""
+    def _extract_messages_for_context(self, sorted_messages: list[GroupMessage]) -> dict:
+        """从已排序的合并消息列表中提取和筛选数据"""
         recent_chats = []
         bot_replies = []
         image_urls = []
@@ -691,38 +745,35 @@ class ContextEnhancerV2(Star):
         # 读取配置
         max_chats = self.config.recent_chats_count
         max_bot_replies = self.config.bot_replies_count
+        max_images = self.config.max_images_in_context
 
-        # 从后向前遍历 buffer 来收集所需数量的消息
-        for msg in reversed(buffer):
-            # 如果两个列表都已填满，则立即停止遍历
-            if len(recent_chats) >= max_chats and len(bot_replies) >= max_bot_replies:
-                break
+        # 从后向前遍历已排序的列表来收集所需数量的消息
+        for msg in reversed(sorted_messages):
+            # 收集图片 URL，直到达到上限
+            if msg.has_image and len(image_urls) < max_images:
+                for img in msg.images:
+                    image_url = getattr(img, "url", None) or getattr(img, "file", None)
+                    if image_url:
+                        image_urls.append(image_url)
 
-            if msg.message_type == ContextMessageType.BOT_REPLY and len(bot_replies) < max_bot_replies:
-                bot_replies.append(f"你回复了: {msg.text_content}")
-            elif msg.message_type != ContextMessageType.BOT_REPLY and len(recent_chats) < max_chats:
-                # 强化输入净化
-                safe_sender_name = msg.sender_name.replace("\n", " ")
-                safe_text_content = msg.text_content.replace("\n", " ")
-
-                text_part = f"{safe_sender_name}: {safe_text_content}"
-                caption_part = ""
-                if msg.image_captions:
-                    # 在格式化输出时动态添加前缀
-                    caption_part = f" [图片: {'; '.join(msg.image_captions)}]"
-
-                if msg.text_content or caption_part:
-                    recent_chats.append(f"{text_part}{caption_part}")
-
-                if msg.has_image:
-                    for img in msg.images:
-                        image_url = getattr(img, "url", None) or getattr(
-                            img, "file", None
-                        )
-                        if image_url:
-                            image_urls.append(image_url)
+            # 收集机器人回复
+            if msg.message_type == ContextMessageType.BOT_REPLY:
+                if len(bot_replies) < max_bot_replies:
+                    bot_replies.append(f"你回复了: {msg.text_content}")
+            # 收集普通聊天记录
+            else:
+                if len(recent_chats) < max_chats:
+                    safe_sender_name = msg.sender_name.replace("\n", " ")
+                    safe_text_content = msg.text_content.replace("\n", " ")
+                    text_part = f"{safe_sender_name}: {safe_text_content}"
+                    caption_part = ""
+                    if msg.image_captions:
+                        caption_part = f" [图片: {'; '.join(msg.image_captions)}]"
+                    
+                    if msg.text_content or caption_part:
+                        recent_chats.append(f"{text_part}{caption_part}")
         
-        # 反转列表以恢复正确的顺序
+        # 反转列表以恢复正确的时序
         recent_chats.reverse()
         bot_replies.reverse()
         image_urls.reverse()
@@ -730,12 +781,12 @@ class ContextEnhancerV2(Star):
         return {
             "recent_chats": recent_chats,
             "bot_replies": bot_replies,
-            "image_urls": image_urls,
+            "image_urls": list(dict.fromkeys(image_urls))[:max_images], # 去重并最终限制数量
         }
 
     def _build_context_enhancement(
         self,
-        buffer: deque,
+        sorted_messages: list[GroupMessage],
         original_prompt: str,
         triggering_message: Optional[GroupMessage],
         scene: str,
@@ -744,7 +795,7 @@ class ContextEnhancerV2(Star):
         构建要追加到原始提示词的增强内容。
         返回 (增强内容字符串, 图片URL列表)。
         """
-        extracted_data = self._extract_messages_for_context(buffer)
+        extracted_data = self._extract_messages_for_context(sorted_messages)
 
         # 构建历史聊天记录部分
         history_parts = [ContextConstants.PROMPT_HEADER]
@@ -786,9 +837,9 @@ class ContextEnhancerV2(Star):
             )
             logger.debug(f"上下文中合并了 {len(final_image_urls)} 张图片")
 
-    def _find_triggering_message_from_event(self, buffer: deque, llm_request_event: AstrMessageEvent) -> tuple[Optional[GroupMessage], str]:
+    def _find_triggering_message_from_event(self, sorted_messages: list[GroupMessage], llm_request_event: AstrMessageEvent) -> tuple[Optional[GroupMessage], str]:
         """
-        在 on_llm_request 事件中，根据 nonce 精确查找触发 LLM 调用的消息，并判断场景。
+        在 on_llm_request 事件中，从已排序的合并消息列表中根据 nonce 精确查找触发 LLM 调用的消息，并判断场景。
 
         返回:
             一个元组 (触发消息对象, 场景字符串)
@@ -803,13 +854,13 @@ class ContextEnhancerV2(Star):
             logger.debug("事件中未找到 nonce，判定为'主动发言'")
             return None, "主动发言"
 
-        # 3. 遍历 buffer 查找匹配的 nonce
-        for message in reversed(buffer):
+        # 3. 遍历已排序的列表查找匹配的 nonce
+        for message in reversed(sorted_messages):
             if message.nonce == nonce:
                 logger.debug(f"通过 nonce 成功匹配到触发消息，判定为'被动回复'")
                 return message, "被动回复"
 
-        # 4. 如果遍历完 buffer 仍未找到，返回 "主动发言"
+        # 4. 如果遍历完仍未找到，返回 "主动发言"
         logger.warning(f"持有 nonce 但在缓冲区中未找到匹配消息，判定为'主动发言'")
         return None, "主动发言"
 
@@ -871,10 +922,10 @@ class ContextEnhancerV2(Star):
                     text_content=response_text[:1000]
                 )
 
-                buffer = await self._get_group_buffer(group_id)
+                buffers = await self._get_or_create_group_buffers(group_id)
                 lock = self._get_or_create_lock(group_id)
                 async with lock:
-                    buffer.append(bot_reply)
+                    buffers.bot_replies.append(bot_reply)
 
                 logger.debug(f"记录机器人回复: {response_text[:50]}...")
 
@@ -892,7 +943,10 @@ class ContextEnhancerV2(Star):
                 if group_id in self.group_messages:
                     lock = self._get_or_create_lock(group_id)
                     async with lock:
-                        self.group_messages[group_id].clear()
+                        # 清空该群组的所有独立缓冲区
+                        self.group_messages[group_id].recent_chats.clear()
+                        self.group_messages[group_id].bot_replies.clear()
+                        self.group_messages[group_id].image_messages.clear()
                     logger.info(f"已清空群组 {group_id} 的内存上下文缓存。")
                 if group_id in self.group_last_activity:
                     del self.group_last_activity[group_id]
@@ -901,7 +955,7 @@ class ContextEnhancerV2(Star):
                     self.group_messages.clear()
                 self.group_last_activity.clear()
                 logger.info("内存中的所有上下文缓存已清空。")
-                if os.path.exists(self.cache_path):
+                if await aio_os.path.exists(self.cache_path):
                     await aio_remove(self.cache_path)
                     logger.info(f"持久化缓存文件 {self.cache_path} 已异步删除。")
 
