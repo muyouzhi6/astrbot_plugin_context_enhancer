@@ -81,11 +81,11 @@ class TestImagePassing(unittest.IsolatedAsyncioTestCase):
         # 模拟配置的 get 方法
         def mock_get(key, default=None):
             configs = {
-                "启用群组": [],  # 对所有群生效
-                "最近聊天记录数量": 15,
-                "机器人回复数量": 5,
-                "上下文图片最大数量": 4,
-                "启用图片描述": True,
+                "enabled_groups": [],
+                "max_normal_messages": 15,
+                "max_bot_replies": 5,
+                "max_image_messages": 4,
+                "enable_image_caption": True,
                 "command_prefixes": ["/"],
             }
             return configs.get(key, default)
@@ -122,8 +122,8 @@ class TestImagePassing(unittest.IsolatedAsyncioTestCase):
         await self.plugin._generate_image_captions(image_msg)
         
         # 将历史消息放入缓冲区
-        buffer = self.plugin._get_group_buffer(group_id)
-        buffer.append(image_msg)
+        buffers = await self.plugin._get_or_create_group_buffers(group_id)
+        buffers.recent_chats.append(image_msg)
 
         # 2. 模拟当前触发 LLM 的事件
         trigger_event = MockAstrMessageEvent(sender, [MockPlain("看这张图")], group_id)

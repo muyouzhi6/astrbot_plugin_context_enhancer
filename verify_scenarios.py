@@ -88,7 +88,7 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         
         # 清空并预置聊天缓存
         self.plugin.group_messages = {}
-        buffer = await self.plugin._get_group_buffer("test_group_123")
+        buffers = await self.plugin._get_or_create_group_buffers("test_group_123")
         
         # 模拟一些历史消息
         mock_sender_past = MockSender("10001", "张三")
@@ -102,7 +102,7 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
             group_id="test_group_123",
             text_content="今天天气不错"
         )
-        buffer.append(past_msg)
+        buffers.recent_chats.append(past_msg)
 
     async def test_passive_user_trigger_scenario(self):
         """测试场景一：用户被动触发"""
@@ -173,8 +173,8 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         logger.info("Step 1: 为两个不同的群组 group_A 和 group_B 添加消息")
         
         # 为 group_A 添加消息
-        await self.plugin._get_group_buffer("group_A")
-        self.plugin.group_messages["group_A"].append(GroupMessage(
+        buffers_A = await self.plugin._get_or_create_group_buffers("group_A")
+        buffers_A.recent_chats.append(GroupMessage(
             message_type=ContextMessageType.NORMAL_CHAT,
             sender_id="user_A",
             sender_name="UserA",
@@ -183,8 +183,8 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         ))
         
         # 为 group_B 添加消息
-        await self.plugin._get_group_buffer("group_B")
-        self.plugin.group_messages["group_B"].append(GroupMessage(
+        buffers_B = await self.plugin._get_or_create_group_buffers("group_B")
+        buffers_B.recent_chats.append(GroupMessage(
             message_type=ContextMessageType.NORMAL_CHAT,
             sender_id="user_B",
             sender_name="UserB",
@@ -193,8 +193,8 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
         ))
 
         # 断言两个群组都有消息
-        self.assertEqual(len(self.plugin.group_messages["group_A"]), 1)
-        self.assertEqual(len(self.plugin.group_messages["group_B"]), 1)
+        self.assertEqual(len(self.plugin.group_messages["group_A"].recent_chats), 1)
+        self.assertEqual(len(self.plugin.group_messages["group_B"].recent_chats), 1)
 
         logger.info("Step 2: 模拟在 group_A 中执行 reset 指令")
         # 构造一个模拟的 Event，代表来自 group_A 的 reset 请求
@@ -213,8 +213,8 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
 
         logger.info("Step 4: 验证 group_B 的上下文是否保持不变")
         self.assertIn("group_B", self.plugin.group_messages, "group_B 的上下文应该仍然存在")
-        self.assertEqual(len(self.plugin.group_messages["group_B"]), 1, "group_B 的消息数量应该保持不变")
-        self.assertEqual(self.plugin.group_messages["group_B"][0].text_content, "Message in group B")
+        self.assertEqual(len(self.plugin.group_messages["group_B"].recent_chats), 1, "group_B 的消息数量应该保持不变")
+        self.assertEqual(self.plugin.group_messages["group_B"].recent_chats[0].text_content, "Message in group B")
 
         logger.info("Test Passed: `reset` 指令成功隔离了群组上下文。")
 

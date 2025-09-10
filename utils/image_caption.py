@@ -113,9 +113,11 @@ class ImageCaptionUtils:
         借鉴 spectrecore 的实现，简化处理流程，将数据直接传递给 provider。
         """
         image_url: str
+        image_content: Optional[bytes] = None
 
-        # 1. 准备 image_url
+        # 1. 准备 image_url 和 image_content
         if isinstance(image, bytes):
+            image_content = image
             # 如果是字节流，检测MIME类型并编码为Data URL
             mime_type = self._get_image_mime_type(image)
             if mime_type is None:
@@ -125,19 +127,25 @@ class ImageCaptionUtils:
         elif isinstance(image, str):
             # 如果是字符串（URL或Data URL），直接使用
             image_url = image
+            if image.startswith('data:image'):
+                try:
+                    image_content = base64.b64decode(image.split(',')[1])
+                except (IndexError, ValueError):
+                    logger.warning("无法解码 Base64 图片字符串，将使用原始字符串作为缓存键")
         else:
             logger.error(f"无效的图片输入源: {type(image)}")
             return None
 
-        # 2. 检查缓存 (使用 image_url 作为 key)
+        # 2. 准备缓存键 (使用图片哈希)
+        image_hash = self._get_image_hash(image_content) if image_content else image_url
         provider = self._get_llm_provider(provider_id)
         model_id = getattr(provider, 'model_id', 'default_model')
-        cache_key = (image_url, custom_prompt, provider_id, model_id)
+        cache_key = (image_hash, custom_prompt, provider_id, model_id)
 
         async with self._cache_lock:
             if cache_key in self._caption_cache:
                 self._caption_cache.move_to_end(cache_key)
-                logger.debug(f"命中图片描述缓存: {image_url[:100]}...")
+                logger.debug(f"命中图片描述缓存 (key: {image_hash})")
                 return self._caption_cache[cache_key]
 
         # 3. 如果缓存未命中，则调用LLM
@@ -160,7 +168,7 @@ class ImageCaptionUtils:
                 if len(self._caption_cache) >= CACHE_MAX_SIZE:
                     self._caption_cache.popitem(last=False)
                 self._caption_cache[cache_key] = caption
-                logger.debug(f"缓存图片描述: {image_url[:100]}... -> {caption}")
+                logger.debug(f"缓存图片描述 (key: {image_hash}): {caption}")
 
         return caption
 

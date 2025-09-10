@@ -65,30 +65,30 @@ class TestCoreLogic(unittest.IsolatedAsyncioTestCase):
 
         logger.info("场景1: 默认配置，应视为重复")
         plugin_default = await self._setup_plugin_with_config({})
-        buffer_default = plugin_default._get_group_buffer("group_1")
-        buffer_default.append(existing_msg)
-        self.assertTrue(plugin_default._is_duplicate_message(buffer_default, new_msg), "在默认配置下，此消息应被视为重复")
+        buffers_default = await plugin_default._get_or_create_group_buffers("group_1")
+        buffers_default.recent_chats.append(existing_msg)
+        self.assertTrue(plugin_default._is_duplicate_message(buffers_default.recent_chats, new_msg), "在默认配置下，此消息应被视为重复")
 
         logger.info("场景2: 缩短去重时间，应不视为重复")
         plugin_short_time = await self._setup_plugin_with_config({"duplicate_check_time_seconds": 5})
-        buffer_short_time = plugin_short_time._get_group_buffer("group_1")
-        buffer_short_time.append(existing_msg)
-        self.assertFalse(plugin_short_time._is_duplicate_message(buffer_short_time, new_msg), "缩短去重时间后，此消息不应被视为重复")
+        buffers_short_time = await plugin_short_time._get_or_create_group_buffers("group_1")
+        buffers_short_time.recent_chats.append(existing_msg)
+        self.assertFalse(plugin_short_time._is_duplicate_message(buffers_short_time.recent_chats, new_msg), "缩短去重时间后，此消息不应被视为重复")
 
         logger.info("场景3: 缩小去重窗口，应不视为重复")
         plugin_small_window = await self._setup_plugin_with_config({"duplicate_check_window_messages": 2})
-        buffer_small_window = plugin_small_window._get_group_buffer("group_1")
+        buffers_small_window = await plugin_small_window._get_or_create_group_buffers("group_1")
         
-        buffer_small_window.append(existing_msg)
+        buffers_small_window.recent_chats.append(existing_msg)
         for i in range(3):
             filler_msg = GroupMessage(
                 message_type=ContextMessageType.NORMAL_CHAT, sender_id="filler", sender_name="Filler",
                 group_id="group_1", text_content=f"filler {i}"
             )
             filler_msg.timestamp = now - datetime.timedelta(seconds=5 - i)
-            buffer_small_window.append(filler_msg)
+            buffers_small_window.recent_chats.append(filler_msg)
 
-        self.assertFalse(plugin_small_window._is_duplicate_message(buffer_small_window, new_msg), "缩小消息窗口后，此消息不应被视为重复")
+        self.assertFalse(plugin_small_window._is_duplicate_message(buffers_small_window.recent_chats, new_msg), "缩小消息窗口后，此消息不应被视为重复")
         
         logger.info("Test Passed: _is_duplicate_message 函数对配置更改的响应符合预期。")
 
@@ -96,7 +96,8 @@ class TestCoreLogic(unittest.IsolatedAsyncioTestCase):
         """为 _is_duplicate_message 函数测试各种核心场景"""
         logger.info(f"\n--- Running test: {self._testMethodName} ---")
         plugin = await self._setup_plugin_with_config({})
-        buffer = plugin._get_group_buffer("group_dedupe")
+        buffers = await plugin._get_or_create_group_buffers("group_dedupe")
+        buffer = buffers.recent_chats
         
         sender1 = MockSender("user1", "Alice")
         sender2 = MockSender("user2", "Bob")
@@ -165,13 +166,17 @@ class TestCoreLogic(unittest.IsolatedAsyncioTestCase):
                 sender_name="Dummy", group_id=group_id, text_content=text
             )
         
-        plugin.group_messages["active_group"] = deque([create_dummy_message("active_group", "message1")])
+        # 使用新的数据结构
+        active_buffers = await plugin._get_or_create_group_buffers("active_group")
+        active_buffers.recent_chats.append(create_dummy_message("active_group", "message1"))
         plugin.group_last_activity["active_group"] = now - datetime.timedelta(days=5)
         
-        plugin.group_messages["inactive_group"] = deque([create_dummy_message("inactive_group", "message2")])
+        inactive_buffers = await plugin._get_or_create_group_buffers("inactive_group")
+        inactive_buffers.recent_chats.append(create_dummy_message("inactive_group", "message2"))
         plugin.group_last_activity["inactive_group"] = now - datetime.timedelta(days=15)
         
-        plugin.group_messages["another_active_group"] = deque([create_dummy_message("another_active_group", "message3")])
+        another_active_buffers = await plugin._get_or_create_group_buffers("another_active_group")
+        another_active_buffers.recent_chats.append(create_dummy_message("another_active_group", "message3"))
         plugin.group_last_activity["another_active_group"] = now
 
         self.assertIn("active_group", plugin.group_messages)
@@ -198,8 +203,8 @@ class TestCoreLogic(unittest.IsolatedAsyncioTestCase):
         with patch.object(mock_event, 'get_group_id', return_value='group_empty_test'):
             await plugin.on_message(mock_event)
         
-        buffer = plugin.group_messages.get("group_empty_test")
-        self.assertIsNone(buffer, "空消息不应该创建任何上下文缓存")
+        buffers = plugin.group_messages.get("group_empty_test")
+        self.assertIsNone(buffers, "空消息不应该创建任何上下文缓存")
 
         logger.info("Test Passed: 插件成功忽略了空消息。")
 

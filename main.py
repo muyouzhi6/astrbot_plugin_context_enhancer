@@ -6,6 +6,7 @@ import traceback
 import json
 import re
 import datetime
+import heapq
 from collections import deque
 import os
 from typing import Dict, Optional
@@ -197,10 +198,8 @@ class ContextEnhancerV2(Star):
         try:
             serializable_data = {}
             for group_id, buffers in self.group_messages.items():
-                # 合并所有缓冲区的消息
-                all_messages = list(buffers.recent_chats) + list(buffers.bot_replies) + list(buffers.image_messages)
-                # 按时间戳排序
-                all_messages.sort(key=lambda msg: msg.timestamp)
+                # 使用 heapq.merge 高效合并已排序的 deques
+                all_messages = heapq.merge(buffers.recent_chats, buffers.bot_replies, buffers.image_messages, key=lambda msg: msg.timestamp)
                 # 序列化
                 serializable_data[group_id] = [msg.to_dict() for msg in all_messages]
 
@@ -692,12 +691,9 @@ class ContextEnhancerV2(Star):
             async with lock:
                 # 合并所有消息用于查找触发消息
                 collect_start = time.monotonic()
-                all_messages = list(buffers.recent_chats) + list(buffers.bot_replies) + list(buffers.image_messages)
-                logger.debug(f"[Profiler] Collecting messages from deque took: {(time.monotonic() - collect_start) * 1000:.2f} ms")
-
-                sort_start = time.monotonic()
-                all_messages.sort(key=lambda msg: msg.timestamp)
-                logger.debug(f"[Profiler] Sorting messages took: {(time.monotonic() - sort_start) * 1000:.2f} ms")
+                # deques are already sorted by timestamp implicitly
+                all_messages = list(heapq.merge(buffers.recent_chats, buffers.bot_replies, buffers.image_messages, key=lambda x: x.timestamp))
+                logger.debug(f"[Profiler] Merging messages from deques took: {(time.monotonic() - collect_start) * 1000:.2f} ms")
 
                 triggering_message, scene = self._find_triggering_message_from_event(all_messages, event)
 
@@ -818,9 +814,8 @@ class ContextEnhancerV2(Star):
     ):
         """将生成的增强内容注入到 ProviderRequest 对象中"""
         if context_enhancement:
-            # 核心逻辑：将增强内容追加到原始 prompt 前面，实现非破坏性注入
-            original_prompt = request.prompt
-            request.prompt = f"{context_enhancement}\n\n{original_prompt}"
+            # 核心逻辑：直接使用构建好的、包含完整指令的增强内容替换原始 prompt
+            request.prompt = context_enhancement
             setattr(request, '_context_enhanced', True)  # 设置标志位
             logger.debug(f"上下文注入完成，新prompt长度: {len(request.prompt)}")
 
