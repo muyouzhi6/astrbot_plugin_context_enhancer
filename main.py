@@ -7,7 +7,7 @@ import json
 import re
 import datetime
 import heapq
-from collections import deque
+from collections import deque, defaultdict
 import os
 from typing import Dict, Optional
 from asyncio import Lock
@@ -173,7 +173,7 @@ class ContextEnhancerV2(Star):
 
         # 群聊消息缓存 - 每个群独立存储
         self.group_messages: Dict[str, "GroupMessageBuffers"] = {}
-        self.group_locks: Dict[str, Lock] = {}
+        self.group_locks: defaultdict[str, Lock] = defaultdict(Lock)
         self.group_last_activity: Dict[str, datetime.datetime] = {}
         self.last_cleanup_time = time.time()
 
@@ -265,8 +265,6 @@ class ContextEnhancerV2(Star):
             self.image_caption_utils = None
 
     def _get_or_create_lock(self, group_id: str) -> Lock:
-        if group_id not in self.group_locks:
-            self.group_locks[group_id] = Lock()
         return self.group_locks[group_id]
 
     async def _load_cache_from_file(self):
@@ -346,7 +344,7 @@ class ContextEnhancerV2(Star):
         )
         inactive_groups = []
 
-        for group_id, last_activity in self.group_last_activity.items():
+        for group_id, last_activity in list(self.group_last_activity.items()):
             if current_time - last_activity > inactive_threshold:
                 inactive_groups.append(group_id)
 
@@ -772,12 +770,11 @@ class ContextEnhancerV2(Star):
         # 反转列表以恢复正确的时序
         recent_chats.reverse()
         bot_replies.reverse()
-        image_urls.reverse()
 
         return {
             "recent_chats": recent_chats,
             "bot_replies": bot_replies,
-            "image_urls": list(dict.fromkeys(image_urls))[:max_images], # 去重并最终限制数量
+            "image_urls": list(dict.fromkeys(reversed(image_urls)))[:max_images], # 去重并最终限制数量
         }
 
     def _build_context_enhancement(
@@ -939,13 +936,11 @@ class ContextEnhancerV2(Star):
                 if group_id in self.group_messages:
                     lock = self._get_or_create_lock(group_id)
                     async with lock:
-                        # 清空该群组的所有独立缓冲区
-                        self.group_messages[group_id].recent_chats.clear()
-                        self.group_messages[group_id].bot_replies.clear()
-                        self.group_messages[group_id].image_messages.clear()
-                    logger.info(f"已清空群组 {group_id} 的内存上下文缓存。")
-                if group_id in self.group_last_activity:
-                    del self.group_last_activity[group_id]
+                        # 使用 pop 安全地移除并返回条目，如果键不存在则返回 None，避免错误
+                        self.group_messages.pop(group_id, None)
+                        self.group_locks.pop(group_id, None)
+                        self.group_last_activity.pop(group_id, None)
+                    logger.info(f"已为群组 {group_id} 清理上下文缓存。")
             else:
                 async with self._global_lock:
                     self.group_messages.clear()

@@ -82,9 +82,9 @@ class TestImagePassing(unittest.IsolatedAsyncioTestCase):
         def mock_get(key, default=None):
             configs = {
                 "enabled_groups": [],
-                "max_normal_messages": 15,
-                "max_bot_replies": 5,
-                "max_image_messages": 4,
+                "recent_chats_count": 15,
+                "bot_replies_count": 5,
+                "max_images_in_context": 4,
                 "enable_image_caption": True,
                 "command_prefixes": ["/"],
             }
