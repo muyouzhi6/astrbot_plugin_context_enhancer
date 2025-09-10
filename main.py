@@ -138,7 +138,7 @@ class GroupMessage:
         return instance
 
 
-@register("context_enhancer_v2", "木有知", "智能群聊上下文增强插件 v2", "2.0.0", repo="https://github.com/your_repo/astrbot_plugin_context_enhancer")
+@register("context_enhancer_v2", "木有知", "智能群聊上下文增强插件 v2", "2.0.0", repo="https://github.com/muyouzhi6/astrbot_plugin_context_enhancer")
 class ContextEnhancerV2(Star):
     """
     AstrBot 上下文增强器 v2.0
@@ -816,12 +816,13 @@ class ContextEnhancerV2(Star):
     def _inject_context_into_request(
         self, request: ProviderRequest, context_enhancement: str, image_urls: list[str]
     ):
-        """将生成的增强内容追加到 ProviderRequest 对象的末尾"""
+        """将生成的增强内容注入到 ProviderRequest 对象中"""
         if context_enhancement:
-            # 核心逻辑：直接使用增强后的内容覆盖原始 prompt
-            request.prompt = context_enhancement
-            setattr(request, '_context_enhanced', True) # 设置标志位
-            logger.debug(f"上下文追加完成，新prompt长度: {len(request.prompt)}")
+            # 核心逻辑：将增强内容追加到原始 prompt 前面，实现非破坏性注入
+            original_prompt = request.prompt
+            request.prompt = f"{context_enhancement}\n\n{original_prompt}"
+            setattr(request, '_context_enhanced', True)  # 设置标志位
+            logger.debug(f"上下文注入完成，新prompt长度: {len(request.prompt)}")
 
         if image_urls:
             max_images = self.config.max_images_in_context
