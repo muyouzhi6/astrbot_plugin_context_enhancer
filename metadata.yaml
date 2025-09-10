@@ -1,11 +1,12 @@
 name: "astrbot_plugin_context_enhancer"
 author: "木有知"
 version: "2.0.0"
-description: "智能上下文增强插件，它能让您的机器人在群聊中“知晓前文，见机行事"
+description: "智能上下文增强插件，它能让您的机器人在群聊中“知晓前文，见机行事”，实现真正意义上的流畅对话。"
 repo: "https://github.com/muyouzhi6/astrbot_plugin_context_enhancer"
 tags: ["工具", "聊天", "上下文增强"]
 license: "MIT"
 python_version: ">=3.8"
 astrophot_version: ">=3.5.0"
+
 
 
