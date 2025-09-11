@@ -182,7 +182,7 @@ class TestCoreLogic(unittest.IsolatedAsyncioTestCase):
         self.assertIn("active_group", plugin.group_messages)
         self.assertIn("inactive_group", plugin.group_messages)
         
-        plugin._cleanup_inactive_groups(now)
+        await plugin._cleanup_inactive_groups(now)
         
         self.assertIn("active_group", plugin.group_messages, "活跃群组不应被清理")
         self.assertIn("another_active_group", plugin.group_messages, "另一个活跃群组不应被清理")

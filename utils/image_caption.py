@@ -2,6 +2,7 @@ import asyncio
 import base64
 import hashlib
 import aiofiles
+from pathlib import Path
 from collections import OrderedDict
 from typing import Optional, Union
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
@@ -92,23 +93,40 @@ class ImageCaptionUtils:
         # 1. 准备 image_url 和 image_content
         if isinstance(image, bytes):
             image_content = image
-            # 如果是字节流，检测MIME类型并编码为Data URL
+        elif isinstance(image, str):
+            image_path = Path(image)
+            if image.startswith(('http://', 'https://')):
+                image_url = image
+                # 对于URL，我们稍后在需要时再获取内容
+            elif image.startswith('data:image'):
+                image_url = image
+                try:
+                    image_content = base64.b64decode(image.split(',')[1])
+                except (IndexError, ValueError):
+                    logger.warning("无法解码 Base64 图片字符串，将不计算图片哈希")
+            elif image_path.is_file():
+                try:
+                    async with aiofiles.open(image_path, 'rb') as f:
+                        image_content = await f.read()
+                    image = image_content  # 将 image 变量更新为 bytes
+                except Exception as e:
+                    logger.error(f"无法读取本地图片文件 {image_path}: {e}")
+                    return f"[无法读取图片: {image_path.name}]"
+            else:
+                logger.warning(f"字符串图片源既不是有效的URL、Data URL，也不是本地文件路径: {image}")
+                image_url = image # 保持原样，让后续逻辑处理
+        else:
+            logger.error(f"无效的图片输入源: {type(image)}")
+            return None
+
+        # 如果 image 已被读取为 bytes，统一处理
+        if isinstance(image, bytes):
+            image_content = image
             mime_type = self._get_image_mime_type(image)
             if mime_type is None:
                 logger.warning("无法识别图片MIME类型，将默认使用 'image/jpeg'")
                 mime_type = 'image/jpeg'
             image_url = f"data:{mime_type};base64,{base64.b64encode(image).decode()}"
-        elif isinstance(image, str):
-            # 如果是字符串（URL或Data URL），直接使用
-            image_url = image
-            if image.startswith('data:image'):
-                try:
-                    image_content = base64.b64decode(image.split(',')[1])
-                except (IndexError, ValueError):
-                    logger.warning("无法解码 Base64 图片字符串，将使用原始字符串作为缓存键")
-        else:
-            logger.error(f"无效的图片输入源: {type(image)}")
-            return None
 
         # 2. 准备缓存键 (使用图片哈希)
         image_hash = self._get_image_hash(image_content) if image_content else image_url

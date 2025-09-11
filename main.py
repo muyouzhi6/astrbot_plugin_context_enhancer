@@ -199,8 +199,16 @@ class ContextEnhancerV2(Star):
         try:
             serializable_data = {}
             for group_id, buffers in self.group_messages.items():
-                # 使用 heapq.merge 高效合并已排序的 deques
-                all_messages = heapq.merge(buffers.recent_chats, buffers.bot_replies, buffers.image_messages, key=lambda msg: msg.timestamp)
+                # 使用 heapq.merge 高效合并已排序的 deques，并立即转换为列表
+                all_messages = list(heapq.merge(
+                    buffers.recent_chats, buffers.bot_replies, buffers.image_messages, key=lambda msg: msg.timestamp
+                ))
+
+                # 在保存前，根据配置裁剪消息列表，防止缓存文件无限增长
+                max_messages_to_save = self.config.recent_chats_count + self.config.bot_replies_count
+                if len(all_messages) > max_messages_to_save:
+                    all_messages = all_messages[-max_messages_to_save:]
+
                 # 序列化
                 serializable_data[group_id] = [msg.to_dict() for msg in all_messages]
 
@@ -672,8 +680,7 @@ class ContextEnhancerV2(Star):
                 # 合并所有消息用于查找触发消息
                 collect_start = time.monotonic()
                 # deques are already sorted by timestamp implicitly
-                # 图片消息现在在 recent_chats 中，因此不再需要合并 image_messages
-                all_messages = list(heapq.merge(buffers.recent_chats, buffers.bot_replies, key=lambda x: x.timestamp))
+                all_messages = list(heapq.merge(buffers.recent_chats, buffers.bot_replies, buffers.image_messages, key=lambda x: x.timestamp))
                 logger.debug(f"[Profiler] Merging messages from deques took: {(time.monotonic() - collect_start) * 1000:.2f} ms")
 
                 triggering_message, scene = self._find_triggering_message_from_event(all_messages, event)
@@ -732,11 +739,11 @@ class ContextEnhancerV2(Star):
             # 收集普通聊天记录
             else:
                 if len(recent_chats) < max_chats:
-                    safe_sender_name = msg.sender_name.replace("\n", " ")
-                    safe_text_content = msg.text_content.replace("\n", " ")
+                    # 保留原始换行符，让LLM更好地理解格式
+                    content = msg.text_content
                     # 文本内容现在已包含图片描述，无需额外处理
-                    if safe_text_content:
-                        recent_chats.append(f"{safe_sender_name}: {safe_text_content}")
+                    if content:
+                        recent_chats.append(f"{msg.sender_name}: {content}")
         
         # 反转列表以恢复正确的时序
         recent_chats.reverse()
