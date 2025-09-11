@@ -1,6 +1,5 @@
 import asyncio
 import base64
-import aiohttp
 import hashlib
 import aiofiles
 from collections import OrderedDict
@@ -27,24 +26,12 @@ class ImageCaptionUtils:
         """初始化图片转述工具类"""
         self.context = context
         self.config = config
-        self.session: Optional[aiohttp.ClientSession] = None
         self._caption_cache: OrderedDict = OrderedDict()
         self._cache_lock = asyncio.Lock()
-        self._session_lock = asyncio.Lock()
-
-    async def _get_session(self) -> aiohttp.ClientSession:
-        """获取 aiohttp ClientSession，如果不存在或已关闭则创建新的"""
-        if self.session is None or self.session.closed:
-            async with self._session_lock:
-                # Double-check locking
-                if self.session is None or self.session.closed:
-                    self.session = aiohttp.ClientSession()
-        return self.session
 
     async def close(self):
         """关闭 aiohttp session"""
-        if self.session and not self.session.closed:
-            await self.session.close()
+        pass
 
     def _get_llm_provider(self, provider_id: Optional[str] = None):
         """根据 provider_id 或全局配置获取LLM提供商"""
@@ -67,19 +54,6 @@ class ImageCaptionUtils:
         # 3. 如果仍然失败，使用默认提供商
         return self.context.get_using_provider()
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_exponential(multiplier=1, min=1, max=10),
-        retry=retry_if_exception_type((ClientError, TimeoutError)),
-        reraise=True
-    )
-    async def _download_image(self, url: str, timeout: int) -> bytes:
-        """下载图片，带有重试机制"""
-        session = await self._get_session()
-        timeout_obj = aiohttp.ClientTimeout(total=timeout)
-        async with session.get(url, timeout=timeout_obj) as response:
-            response.raise_for_status()
-            return await response.read()
 
     def _get_image_mime_type(self, image_bytes: bytes) -> Optional[str]:
         """通过检查文件的魔术数字来检测常见的MIME类型"""

@@ -7,6 +7,7 @@ import json
 import re
 import datetime
 import heapq
+import itertools
 from collections import deque, defaultdict
 import os
 from typing import Dict, Optional
@@ -327,7 +328,7 @@ class ContextEnhancerV2(Star):
         # 基于时间的缓存清理
         now = time.time()
         if now - self.last_cleanup_time > self.config.cleanup_interval_seconds:
-            self._cleanup_inactive_groups(current_dt)
+            await self._cleanup_inactive_groups(current_dt)
             self.last_cleanup_time = now
 
         if group_id not in self.group_messages:
@@ -337,24 +338,26 @@ class ContextEnhancerV2(Star):
                     self.group_messages[group_id] = self._create_new_group_buffers()
         return self.group_messages[group_id]
 
-    def _cleanup_inactive_groups(self, current_time: datetime.datetime):
+    async def _cleanup_inactive_groups(self, current_time: datetime.datetime):
         """清理超过配置天数未活跃的群组缓存"""
         inactive_threshold = datetime.timedelta(
             days=self.config.inactive_cleanup_days
         )
         inactive_groups = []
 
+        # 这个循环是安全的，因为它只读取 self.group_last_activity
         for group_id, last_activity in list(self.group_last_activity.items()):
             if current_time - last_activity > inactive_threshold:
                 inactive_groups.append(group_id)
 
-        for group_id in inactive_groups:
-            if group_id in self.group_messages:
-                del self.group_messages[group_id]
-            del self.group_last_activity[group_id]
-
         if inactive_groups:
-            logger.debug(f"清理了 {len(inactive_groups)} 个不活跃群组的缓存")
+            logger.info(f"准备清理 {len(inactive_groups)} 个不活跃的群组上下文缓存...")
+            async with self._global_lock:
+                for group_id in inactive_groups:
+                    self.group_messages.pop(group_id, None)
+                    self.group_last_activity.pop(group_id, None)
+                    self.group_locks.pop(group_id, None)
+            logger.info("不活跃群组上下文缓存清理完毕。")
 
     def is_chat_enabled(self, event: AstrMessageEvent) -> bool:
         """检查当前聊天是否启用增强功能"""
@@ -401,10 +404,12 @@ class ContextEnhancerV2(Star):
             duration = (time.monotonic() - start_time) * 1000
             logger.debug(f"[Profiler] on_message took: {duration:.2f} ms")
 
-    def _create_group_message_from_event(self, event: AstrMessageEvent, message_type: str) -> GroupMessage:
-        """从事件创建 GroupMessage 实例"""
+    async def _create_group_message_from_event(self, event: AstrMessageEvent, message_type: str) -> GroupMessage:
+        """从事件创建 GroupMessage 实例，并在检测到图片时同步获取描述"""
         text_content_parts = []
-        images = []
+        images = [] # 仅用于临时检查，最终不存储
+        has_image_component = False
+
         if event.message_obj and event.message_obj.message:
             for comp in event.message_obj.message:
                 if isinstance(comp, Plain):
@@ -412,7 +417,37 @@ class ContextEnhancerV2(Star):
                 elif isinstance(comp, At):
                     text_content_parts.append(f"@{comp.qq}")
                 elif isinstance(comp, Image):
-                    images.append(comp)
+                    has_image_component = True
+                    images.append(comp) # 临时存储以供后续处理
+                    # 如果禁用了图片描述，则添加一个简单的占位符
+                    if not self.config.enable_image_caption or not self.image_caption_utils:
+                        text_content_parts.append("[图片]")
+        
+        # 如果启用了图片描述，则在此处同步处理
+        if has_image_component and self.config.enable_image_caption and self.image_caption_utils:
+            image_captions = []
+            for img in images:
+                try:
+                    image_data = getattr(img, "url", None) or getattr(img, "file", None)
+                    if image_data:
+                        caption = await self.image_caption_utils.generate_image_caption(
+                            image_data,
+                            timeout=self.config.image_caption_timeout,
+                            provider_id=self.config.image_caption_provider_id or None,
+                            custom_prompt=self.config.image_caption_prompt,
+                        )
+                        # 将描述格式化并添加到文本部分
+                        image_captions.append(caption or "图片内容未知")
+                    else:
+                        image_captions.append("图片")
+                except Exception as e:
+                    logger.debug(f"在消息创建期间生成图片描述失败: {e}")
+                    image_captions.append("图片")
+            
+            if image_captions:
+                # 将所有图片的描述合并为一个字符串，并添加到文本内容的末尾
+                text_content_parts.append(f"[Image: {'; '.join(image_captions)}]")
+
 
         # 1. 优先使用标准方法
         sender_name = event.get_sender_name()
@@ -427,22 +462,26 @@ class ContextEnhancerV2(Star):
         # 3. 最后使用后备值 "用户"
         final_sender_name = sender_name or "用户"
         
+        # 安全地获取 message_obj
+        message_obj = getattr(event, 'message_obj', None)
+        
         return GroupMessage(
             message_type=message_type,
             sender_id=event.get_sender_id() or "unknown",
             sender_name=final_sender_name,
             group_id=event.get_group_id(),
             text_content="".join(text_content_parts).strip(),
-            images=images,
+            images=[],  # images 列表现在为空，因为信息已转换为文本
             # 尝试从不同事件结构中获取消息ID，兼容直接事件和包装后的事件对象
-            message_id=getattr(event, 'id', None) or getattr(getattr(event, 'message_obj', None), 'id', None),
+            message_id=getattr(event, 'id', None) or (message_obj and getattr(message_obj, 'id', None)),
             nonce=getattr(event, '_context_enhancer_nonce', None)
         )
 
     async def _handle_group_message(self, event: AstrMessageEvent):
         """处理群聊消息"""
-        group_msg = self._create_group_message_from_event(event, "")  # 临时创建以检查内容
-        if not group_msg.text_content and not group_msg.images:
+        # 现在 create 方法是 async 的，需要 await
+        group_msg = await self._create_group_message_from_event(event, "")  # 临时创建以检查内容
+        if not group_msg.text_content and not group_msg.has_image: # 检查 has_image 以防万一
             logger.debug("消息为空（无文本无图片），跳过处理。")
             return
 
@@ -453,10 +492,6 @@ class ContextEnhancerV2(Star):
             message_type = self._classify_message(event)
             group_msg.message_type = message_type # 更新消息类型
 
-            # 生成图片描述（作为后台任务）
-            if group_msg.has_image and self.config.enable_image_caption:
-                asyncio.create_task(self._generate_image_captions(group_msg))
-
             # 获取或创建该群组的缓冲区集合
             buffers = await self._get_or_create_group_buffers(group_msg.group_id)
             lock = self._get_or_create_lock(group_msg.group_id)
@@ -466,8 +501,7 @@ class ContextEnhancerV2(Star):
                 target_deque = None
                 if message_type == ContextMessageType.BOT_REPLY:
                     target_deque = buffers.bot_replies
-                elif group_msg.has_image:
-                    target_deque = buffers.image_messages
+                # 图片消息现在作为普通聊天处理，因为内容已是文本
                 else: # NORMAL_CHAT or LLM_TRIGGERED
                     target_deque = buffers.recent_chats
 
@@ -492,7 +526,8 @@ class ContextEnhancerV2(Star):
             return False
             
         # 检查最近N条消息即可，避免性能问题
-        recent_messages = list(target_deque)[-self.config.duplicate_check_window_messages:] if target_deque else []
+        start_index = max(0, len(target_deque) - self.config.duplicate_check_window_messages)
+        recent_messages = list(itertools.islice(target_deque, start_index, len(target_deque)))
 
         for existing_msg in recent_messages:
             # 重复判断条件：
@@ -607,59 +642,6 @@ class ContextEnhancerV2(Star):
             event, "is_at_or_wake_command", False
         )
 
-    async def _generate_image_captions(self, group_msg: GroupMessage):
-        """为图片生成智能描述，使用高级图片分析功能，支持独立的图片描述提供商"""
-        try:
-            if not group_msg.images:
-                return
-
-            # 检查是否启用图片描述
-            if not self.config.enable_image_caption:
-                # 如果禁用，使用简单占位符
-                for i, img in enumerate(group_msg.images):
-                    group_msg.image_captions.append(f"图片{i + 1}")
-                return
-
-            # 使用高级图片描述功能
-            captions = []
-            # 从统一配置中获取
-            image_caption_provider_id = self.config.image_caption_provider_id
-            image_caption_prompt = self.config.image_caption_prompt
-
-            for i, img in enumerate(group_msg.images):
-                try:
-                    # 获取图片的URL或路径
-                    image_data = getattr(img, "url", None) or getattr(img, "file", None)
-                    if image_data and self.image_caption_utils is not None:
-                        # 调用图片描述工具，传入特定的提供商ID和提示词
-                        caption = await self.image_caption_utils.generate_image_caption(
-                            image_data,
-                            timeout=self.config.image_caption_timeout,
-                            provider_id=image_caption_provider_id
-                            if image_caption_provider_id
-                            else None,
-                            custom_prompt=image_caption_prompt,
-                        )
-                        if caption:
-                            # 直接存储纯净的描述文本
-                            captions.append(caption)
-                        else:
-                            # 如果没有生成描述，可以添加一个默认占位符或空字符串
-                            captions.append("图片")
-                    else:
-                        captions.append("图片")
-                except Exception as e:
-                    logger.debug(f"生成图片{i + 1}描述失败: {e}")
-                    captions.append("图片")
-
-            group_msg.image_captions = captions
-
-        except Exception as e:
-            logger.warning(f"生成图片描述时发生错误: {e}")
-            # 降级到简单占位符
-            for i, img in enumerate(group_msg.images):
-                group_msg.image_captions.append(f"图片{i + 1}")
-
     @event_filter.on_llm_request(priority=100)
     async def on_llm_request(self, event: AstrMessageEvent, request: ProviderRequest):
         """
@@ -690,20 +672,21 @@ class ContextEnhancerV2(Star):
                 # 合并所有消息用于查找触发消息
                 collect_start = time.monotonic()
                 # deques are already sorted by timestamp implicitly
-                all_messages = list(heapq.merge(buffers.recent_chats, buffers.bot_replies, buffers.image_messages, key=lambda x: x.timestamp))
+                # 图片消息现在在 recent_chats 中，因此不再需要合并 image_messages
+                all_messages = list(heapq.merge(buffers.recent_chats, buffers.bot_replies, key=lambda x: x.timestamp))
                 logger.debug(f"[Profiler] Merging messages from deques took: {(time.monotonic() - collect_start) * 1000:.2f} ms")
 
                 triggering_message, scene = self._find_triggering_message_from_event(all_messages, event)
 
                 # 4. 构建上下文增强内容
                 build_start = time.monotonic()
-                context_enhancement, image_urls = self._build_context_enhancement(
+                context_enhancement = self._build_context_enhancement(
                     all_messages, request.prompt, triggering_message, scene
                 )
                 logger.debug(f"[Profiler] _build_context_enhancement took: {(time.monotonic() - build_start) * 1000:.2f} ms")
 
             # 5. 将上下文注入到请求中
-            self._inject_context_into_request(request, context_enhancement, image_urls)
+            self._inject_context_into_request(request, context_enhancement)
 
         except Exception as e:
             logger.error(f"上下文增强时发生错误: {e}")
@@ -734,22 +717,14 @@ class ContextEnhancerV2(Star):
         """从已排序的合并消息列表中提取和筛选数据"""
         recent_chats = []
         bot_replies = []
-        image_urls = []
+        # image_urls 列表不再需要，因为图片信息已在文本中
 
         # 读取配置
         max_chats = self.config.recent_chats_count
         max_bot_replies = self.config.bot_replies_count
-        max_images = self.config.max_images_in_context
 
         # 从后向前遍历已排序的列表来收集所需数量的消息
         for msg in reversed(sorted_messages):
-            # 收集图片 URL，直到达到上限
-            if msg.has_image and len(image_urls) < max_images:
-                for img in msg.images:
-                    image_url = getattr(img, "url", None) or getattr(img, "file", None)
-                    if image_url:
-                        image_urls.append(image_url)
-
             # 收集机器人回复
             if msg.message_type == ContextMessageType.BOT_REPLY:
                 if len(bot_replies) < max_bot_replies:
@@ -759,13 +734,9 @@ class ContextEnhancerV2(Star):
                 if len(recent_chats) < max_chats:
                     safe_sender_name = msg.sender_name.replace("\n", " ")
                     safe_text_content = msg.text_content.replace("\n", " ")
-                    text_part = f"{safe_sender_name}: {safe_text_content}"
-                    caption_part = ""
-                    if msg.image_captions:
-                        caption_part = f" [图片: {'; '.join(msg.image_captions)}]"
-                    
-                    if msg.text_content or caption_part:
-                        recent_chats.append(f"{text_part}{caption_part}")
+                    # 文本内容现在已包含图片描述，无需额外处理
+                    if safe_text_content:
+                        recent_chats.append(f"{safe_sender_name}: {safe_text_content}")
         
         # 反转列表以恢复正确的时序
         recent_chats.reverse()
@@ -774,7 +745,6 @@ class ContextEnhancerV2(Star):
         return {
             "recent_chats": recent_chats,
             "bot_replies": bot_replies,
-            "image_urls": list(dict.fromkeys(reversed(image_urls)))[:max_images], # 去重并最终限制数量
         }
 
     def _build_context_enhancement(
@@ -783,10 +753,10 @@ class ContextEnhancerV2(Star):
         original_prompt: str,
         triggering_message: Optional[GroupMessage],
         scene: str,
-    ) -> tuple[str, list[str]]:
+    ) -> str:
         """
         构建要追加到原始提示词的增强内容。
-        返回 (增强内容字符串, 图片URL列表)。
+        返回增强内容字符串。
         """
         extracted_data = self._extract_messages_for_context(sorted_messages)
 
@@ -804,10 +774,10 @@ class ContextEnhancerV2(Star):
         # 组合成最终的增强内容
         final_enhancement = f"{context_str}\n\n{instruction_prompt}"
         
-        return final_enhancement, extracted_data["image_urls"]
+        return final_enhancement
 
     def _inject_context_into_request(
-        self, request: ProviderRequest, context_enhancement: str, image_urls: list[str]
+        self, request: ProviderRequest, context_enhancement: str
     ):
         """将生成的增强内容注入到 ProviderRequest 对象中"""
         if context_enhancement:
@@ -816,19 +786,8 @@ class ContextEnhancerV2(Star):
             setattr(request, '_context_enhanced', True)  # 设置标志位
             logger.debug(f"上下文注入完成，新prompt长度: {len(request.prompt)}")
 
-        if image_urls:
-            max_images = self.config.max_images_in_context
-            # 去重并限制数量
-            final_image_urls = list(dict.fromkeys(image_urls))[-max_images:]
-
-            if not request.image_urls:
-                request.image_urls = []
-            
-            # 合并并去重，确保新图片在前
-            request.image_urls = list(
-                dict.fromkeys(final_image_urls + request.image_urls)
-            )
-            logger.debug(f"上下文中合并了 {len(final_image_urls)} 张图片")
+        # 图片URL的处理逻辑已移除，因为它们现在是文本的一部分
+        # request.image_urls 将保持原样，不会被此插件修改
 
     def _find_triggering_message_from_event(self, sorted_messages: list[GroupMessage], llm_request_event: AstrMessageEvent) -> tuple[Optional[GroupMessage], str]:
         """

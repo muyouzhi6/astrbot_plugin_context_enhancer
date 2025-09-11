@@ -209,10 +209,10 @@ class TestContextEnhancerScenarios(unittest.IsolatedAsyncioTestCase):
             await self.plugin.on_message(mock_event_A)
 
         logger.info("Step 3: 验证 group_A 的上下文是否被清空，而 group_B 保持不变")
-        # 检查 group_A 的 recent_chats deque 是否为空
-        self.assertEqual(len(self.plugin.group_messages["group_A"].recent_chats), 0, "group_A 的上下文应该被清空")
+        # 检查 group_A 的键是否已从字典中被移除
+        self.assertNotIn("group_A", self.plugin.group_messages, "group_A 的键应该被删除")
         
-        # 检查 group_B 的 deque 是否仍然有内容，以确保隔离性
+        # 检查 group_B 的键是否仍然存在，以确保隔离性
         self.assertIn("group_B", self.plugin.group_messages, "group_B 的键不应该被删除")
         self.assertNotEqual(len(self.plugin.group_messages["group_B"].recent_chats), 0, "group_B 的上下文不应该被清空")
         self.assertEqual(len(self.plugin.group_messages["group_B"].recent_chats), 1, "group_B 的消息数量应该保持不变")
