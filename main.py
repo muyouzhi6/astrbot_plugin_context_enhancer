@@ -24,7 +24,7 @@ from astrbot.api.event import filter as event_filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register, StarTools
 from astrbot.api import logger, AstrBotConfig
 from astrbot.api.provider import ProviderRequest
-from astrbot.api.message_components import Plain, At, Image
+from astrbot.api.message_components import Plain, At, Image, Face, Reply
 from astrbot.api.platform import MessageType
 
 # 导入工具模块
@@ -91,9 +91,10 @@ class GroupMessage:
                  sender_name: str,
                  group_id: str,
                  text_content: str = "",
-                 images: Optional[list] = None,
+                 images: Optional[list[str]] = None,
                  message_id: Optional[str] = None,
-                 nonce: Optional[str] = None):
+                 nonce: Optional[str] = None,
+                 raw_components: Optional[list] = None):
         self.id = message_id
         self.nonce = nonce
         self.message_type = message_type
@@ -105,9 +106,23 @@ class GroupMessage:
         self.images = images or []
         self.has_image = len(self.images) > 0
         self.image_captions: list[str] = []
+        self.raw_components = raw_components or []
 
     def to_dict(self) -> dict:
         """将消息对象转换为可序列化为 JSON 的字典"""
+        # 序列化 raw_components
+        serializable_components = []
+        for comp in self.raw_components:
+            if hasattr(comp, 'to_dict'):
+                serializable_components.append(comp.to_dict())
+            else:
+                # 对于没有 to_dict 方法的组件，尝试转换为字符串
+                try:
+                    # 修复 #3: 改进对未知组件的序列化处理
+                    serializable_components.append({"type": comp.__class__.__name__, "content": str(comp)})
+                except Exception:
+                    serializable_components.append({"type": "unknown", "content": str(comp)})
+
         return {
             "id": self.id,
             "nonce": self.nonce,
@@ -119,24 +134,35 @@ class GroupMessage:
             "text_content": self.text_content,
             "has_image": self.has_image,
             "image_captions": self.image_captions,
-            "image_urls": [getattr(img, "url", None) or getattr(img, "file", None) for img in self.images]
+            "images": self.images,  # 直接存储 URL 列表
+            "raw_components": serializable_components
         }
 
     @classmethod
     def from_dict(cls, data: dict):
         """从字典创建 GroupMessage 对象"""
+        # 注意：从字典恢复 raw_components 较为复杂，
+        # 这里我们只恢复其字典形式，因为原始对象类型信息已丢失。
+        # 如果需要完全恢复，需要一个组件工厂函数。
+        # 目前的实现对于数据存储和传输是足够的。
+       # 修复 #1: 增强向后兼容性，使用 .get() 并提供默认值
         instance = cls(
-            message_type=data["message_type"],
-            sender_id=data.get("sender_id", "unknown"),
-            sender_name=data.get("sender_name", "用户"),
-            group_id=data.get("group_id", ""),
-            text_content=data.get("text_content", ""),
-            images=[Image.fromURL(url=url) for url in data.get("image_urls", []) if url],
-            message_id=data.get("id"),
-            nonce=data.get("nonce")
+           message_type=data.get("message_type", ContextMessageType.NORMAL_CHAT),
+           sender_id=data.get("sender_id", "unknown"),
+           sender_name=data.get("sender_name", "用户"),
+           group_id=data.get("group_id", ""),
+           text_content=data.get("text_content", ""),
+           images=data.get("images", []),
+           message_id=data.get("id"),
+           nonce=data.get("nonce"),
+           raw_components=data.get("raw_components", [])
         )
-        instance.timestamp = datetime.datetime.fromisoformat(data["timestamp"])
+        # 时间戳是核心字段，如果缺少则可能无法处理，但仍尝试提供默认值
+        timestamp_str = data.get("timestamp")
+        instance.timestamp = datetime.datetime.fromisoformat(timestamp_str) if timestamp_str else datetime.datetime.now()
         instance.image_captions = data.get("image_captions", [])
+       # has_image 属性需要根据恢复的 images 列表重新计算
+        instance.has_image = len(instance.images) > 0
         return instance
 
 
@@ -415,18 +441,28 @@ class ContextEnhancerV2(Star):
     async def _create_group_message_from_event(self, event: AstrMessageEvent, message_type: str) -> GroupMessage:
         """从事件创建 GroupMessage 实例，并在检测到图片时同步获取描述"""
         text_content_parts = []
-        images = [] # 仅用于临时检查，最终不存储
+        images = []
         has_image_component = False
+        
+        # 安全地获取 message_obj 和 raw_components
+        message_obj = getattr(event, 'message_obj', None)
+        raw_components = message_obj.message if message_obj and hasattr(message_obj, 'message') else []
 
-        if event.message_obj and event.message_obj.message:
-            for comp in event.message_obj.message:
+        if raw_components:
+            for comp in raw_components:
                 if isinstance(comp, Plain):
                     text_content_parts.append(comp.text)
                 elif isinstance(comp, At):
                     text_content_parts.append(f"@{comp.qq}")
+                elif isinstance(comp, Face):
+                    text_content_parts.append(f"[表情]")
+                elif isinstance(comp, Reply):
+                    text_content_parts.append(f"[引用了 {comp.sender_nickname} 的消息]")
                 elif isinstance(comp, Image):
                     has_image_component = True
-                    images.append(comp) # 临时存储以供后续处理
+                    image_url = getattr(comp, "url", None) or getattr(comp, "file", None)
+                    if image_url:
+                        images.append(image_url)
                     # 如果禁用了图片描述，则添加一个简单的占位符
                     if not self.config.enable_image_caption or not self.image_caption_utils:
                         text_content_parts.append("[图片]")
@@ -434,12 +470,11 @@ class ContextEnhancerV2(Star):
         # 如果启用了图片描述，则在此处同步处理
         if has_image_component and self.config.enable_image_caption and self.image_caption_utils:
             image_captions = []
-            for img in images:
+            for image_url in images:
                 try:
-                    image_data = getattr(img, "url", None) or getattr(img, "file", None)
-                    if image_data:
+                    if image_url:
                         caption = await self.image_caption_utils.generate_image_caption(
-                            image_data,
+                            image_url,
                             timeout=self.config.image_caption_timeout,
                             provider_id=self.config.image_caption_provider_id or None,
                             custom_prompt=self.config.image_caption_prompt,
@@ -470,19 +505,17 @@ class ContextEnhancerV2(Star):
         # 3. 最后使用后备值 "用户"
         final_sender_name = sender_name or "用户"
         
-        # 安全地获取 message_obj
-        message_obj = getattr(event, 'message_obj', None)
-        
         return GroupMessage(
             message_type=message_type,
             sender_id=event.get_sender_id() or "unknown",
             sender_name=final_sender_name,
             group_id=event.get_group_id(),
             text_content="".join(text_content_parts).strip(),
-            images=[],  # images 列表现在为空，因为信息已转换为文本
+            images=images,  # 存储收集到的图片 URL
             # 尝试从不同事件结构中获取消息ID，兼容直接事件和包装后的事件对象
             message_id=getattr(event, 'id', None) or (message_obj and getattr(message_obj, 'id', None)),
-            nonce=getattr(event, '_context_enhancer_nonce', None)
+            nonce=getattr(event, '_context_enhancer_nonce', None),
+            raw_components=raw_components
         )
 
     async def _handle_group_message(self, event: AstrMessageEvent):
@@ -687,13 +720,13 @@ class ContextEnhancerV2(Star):
 
                 # 4. 构建上下文增强内容
                 build_start = time.monotonic()
-                context_enhancement = self._build_context_enhancement(
+                context_enhancement, image_urls_for_context = self._build_context_enhancement(
                     all_messages, request.prompt, triggering_message, scene
                 )
                 logger.debug(f"[Profiler] _build_context_enhancement took: {(time.monotonic() - build_start) * 1000:.2f} ms")
 
             # 5. 将上下文注入到请求中
-            self._inject_context_into_request(request, context_enhancement)
+            self._inject_context_into_request(request, context_enhancement, image_urls_for_context)
 
         except Exception as e:
             logger.error(f"上下文增强时发生错误: {e}")
@@ -760,12 +793,23 @@ class ContextEnhancerV2(Star):
         original_prompt: str,
         triggering_message: Optional[GroupMessage],
         scene: str,
-    ) -> str:
+    ) -> tuple[str, list[str]]:
         """
-        构建要追加到原始提示词的增强内容。
-        返回增强内容字符串。
+        构建要追加到原始提示词的增强内容和图片URL列表。
+        返回一个元组: (增强内容字符串, 图片URL列表)
         """
         extracted_data = self._extract_messages_for_context(sorted_messages)
+
+        # 提取图片URL
+        image_urls = []
+        for msg in sorted_messages:
+            if msg.images:
+                image_urls.extend(msg.images)
+        
+        # 限制图片数量
+        if len(image_urls) > self.config.max_images_in_context:
+            image_urls = image_urls[-self.config.max_images_in_context:]
+
 
         # 构建历史聊天记录部分
         history_parts = [ContextConstants.PROMPT_HEADER]
@@ -781,20 +825,23 @@ class ContextEnhancerV2(Star):
         # 组合成最终的增强内容
         final_enhancement = f"{context_str}\n\n{instruction_prompt}"
         
-        return final_enhancement
+        return final_enhancement, image_urls
 
     def _inject_context_into_request(
-        self, request: ProviderRequest, context_enhancement: str
+        self, request: ProviderRequest, context_enhancement: str, image_urls: list[str]
     ):
-        """将生成的增强内容注入到 ProviderRequest 对象中"""
+        """将生成的增强内容和图片URL注入到 ProviderRequest 对象中"""
         if context_enhancement:
             # 核心逻辑：直接使用构建好的、包含完整指令的增强内容替换原始 prompt
             request.prompt = context_enhancement
             setattr(request, '_context_enhanced', True)  # 设置标志位
             logger.debug(f"上下文注入完成，新prompt长度: {len(request.prompt)}")
 
-        # 图片URL的处理逻辑已移除，因为它们现在是文本的一部分
-        # request.image_urls 将保持原样，不会被此插件修改
+        if image_urls:
+            if not hasattr(request, 'image_urls') or request.image_urls is None:
+                request.image_urls = []
+            request.image_urls.extend(image_urls)
+            logger.debug(f"向请求中追加了 {len(image_urls)} 张图片URL。")
 
     def _find_triggering_message_from_event(self, sorted_messages: list[GroupMessage], llm_request_event: AstrMessageEvent) -> tuple[Optional[GroupMessage], str]:
         """
@@ -819,9 +866,10 @@ class ContextEnhancerV2(Star):
                 logger.debug(f"通过 nonce 成功匹配到触发消息，判定为'被动回复'")
                 return message, "被动回复"
 
-        # 4. 如果遍历完仍未找到，返回 "主动发言"
-        logger.warning(f"持有 nonce 但在缓冲区中未找到匹配消息，判定为'主动发言'")
-        return None, "主动发言"
+        # 修复 #2: 核心逻辑变更 - 有 nonce 就一定是“被动回复”
+        # 即使在缓冲区中找不到消息，也应保持场景判断的一致性。
+        logger.warning(f"持有 nonce 但在缓冲区中未找到匹配的触发消息。仍判定为'被动回复'场景。")
+        return None, "被动回复"
 
     def _format_recent_chats_section(self, recent_chats: list) -> list:
         """格式化最近的聊天记录部分"""
@@ -842,11 +890,14 @@ class ContextEnhancerV2(Star):
         scenario: str,
     ) -> str:
         """根据场景格式化指令性提示词"""
-        if scenario == "被动回复" and triggering_message:
+        if scenario == "被动回复":
+            # 修复 #2: 即使 triggering_message 为 None，也使用被动回复模板
             instruction = self.config.passive_reply_instruction
+            sender_name = triggering_message.sender_name if triggering_message else "未知用户"
+            sender_id = triggering_message.sender_id if triggering_message else "unknown"
             return instruction.format(
-                sender_name=triggering_message.sender_name,
-                sender_id=triggering_message.sender_id,
+                sender_name=sender_name,
+                sender_id=sender_id,
                 original_prompt=original_prompt,
             )
         else:
