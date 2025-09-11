@@ -35,23 +35,6 @@ Context Enhancer 是一个为大语言模型（LLM）设计的上下文预处理
 
 *   **解耦与持久化 (Decoupled & Persistent)**：采用独立的 `GroupMessage` 数据结构来存储上下文，实现了与框架底层事件的解耦。这不仅使上下文的**缓存和跨会话持久化**成为可能，也增强了系统的模块化和可维护性。
 
-## 安装与启用
-
-1.  将插件放置于 `data/plugins/` 目录下。
-2.  重启 AstrBot。
-3.  在 `config/plugin_config.yaml` 文件中找到 `astrbot_plugin_context_enhancer` 的配置项。
-4.  在 `enabled_groups` 列表中填入您想启用此插件的群组 ID。如果列表为空 (`[]`)，插件将对所有群组生效。
-
-**示例配置 (`config/plugin_config.yaml`):**
-```yaml
-plugin:
-  # ... 其他插件
-  astrbot_plugin_context_enhancer:
-    enabled_groups:
-      - "12345678"  # 在这个群里启用
-      - "87654321"  # 在这个群里也启用
-    # ... 其他配置项
-```
 
 ## 配置说明
 
@@ -86,5 +69,6 @@ plugin:
     *   当机器人被@时，插件触发 `on_llm_request`。
     *   它将历史聊天记录（包括用户B的提问）和**图片URL**打包，一起发送给多模态LLM。
 4.  **机器人回复**：“根据图片来看，这很可能是一只中华田园猫，通常我们称之为‘大橘’。它的毛色非常经典！”
+
 
 通过这种方式，机器人能够直接理解图片内容并结合问题进行回答，实现了真正意义上的多模态对话。
