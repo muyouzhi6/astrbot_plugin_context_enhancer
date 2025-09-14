@@ -280,8 +280,8 @@ class ContextEnhancerV2(Star):
             command_prefixes=self.raw_config.get("command_prefixes", ["/", "!", "！", "#", ".", "。"]),
             duplicate_check_window_messages=self.raw_config.get("duplicate_check_window_messages", 5),
             duplicate_check_time_seconds=self.raw_config.get("duplicate_check_time_seconds", 30),
-            passive_reply_instruction=self.raw_config.get("passive_reply_instruction", '现在，群成员 {sender_name} (ID: {sender_id}) 正在对你说话，或者提到了你，TA说："{original_prompt}"\n你需要根据以上聊天记录和你的角色设定，直接回复该用户。'),
-            active_speech_instruction=self.raw_config.get("active_speech_instruction", '以上是最近的聊天记录。现在，你决定主动参与讨论，并想就以下内容发表你的看法："{original_prompt}"\n你需要根据以上聊天记录和你的角色设定，自然地切入对话。'),
+            passive_reply_instruction=self.raw_config.get("passive_reply_instruction", '现在，群成员 {sender_name} (ID: {sender_id}) 正在对你说话，或者提到了你，TA说："{original_prompt}"\n你需要根据以上聊天记录和你的角色设定，直接回复该用户。（不要回复本消息，这只是个提示）'),
+            active_speech_instruction=self.raw_config.get("active_speech_instruction", '以上是最近的聊天记录。现在，你决定主动参与讨论，并想就以下内容发表你的看法："{original_prompt}"\n你需要根据以上聊天记录和你的角色设定，自然地切入对话。（不要回复本消息，这只是个提示）'),
         )
 
     def _initialize_utils(self):
@@ -979,3 +979,4 @@ class ContextEnhancerV2(Star):
             await self.clear_context_cache(group_id=group_id)
         else:
             logger.warning("无法获取 group_id，无法执行定向清空操作。")
+
