@@ -438,12 +438,44 @@ class ContextEnhancerV2(Star):
             duration = (time.monotonic() - start_time) * 1000
             logger.debug(f"[Profiler] on_message took: {duration:.2f} ms")
 
+    def _extract_user_info_from_event(self, event: AstrMessageEvent) -> tuple[str, str]:
+        """
+        从事件中提取用户ID和昵称的统一方法
+        返回: (sender_name, sender_id)
+        """
+        # 1. 优先使用标准方法
+        sender_name = event.get_sender_name()
+        sender_id = event.get_sender_id()
+
+        # 2. 如果标准方法失败，尝试从 message_obj.sender 获取
+        if not sender_name or not sender_id:
+            message_obj = getattr(event, 'message_obj', None)
+            if message_obj and hasattr(message_obj, 'sender') and message_obj.sender:
+                sender = message_obj.sender
+                if not sender_name and hasattr(sender, 'nickname'):
+                    sender_name = sender.nickname
+                if not sender_id and hasattr(sender, 'user_id'):
+                    sender_id = sender.user_id
+
+        # 3. 如果仍然失败，尝试从原始事件数据中获取 (兼容性)
+        if not sender_name or not sender_id:
+            raw_event = getattr(event, 'raw_event', None)
+            if raw_event and isinstance(raw_event.get("sender"), dict):
+                raw_sender = raw_event["sender"]
+                if not sender_name:
+                    sender_name = raw_sender.get("card") or raw_sender.get("nickname")
+                if not sender_id:
+                    sender_id = raw_sender.get("user_id") or raw_sender.get("id")
+
+        # 4. 最后使用后备值
+        return sender_name or "用户", sender_id or "unknown"
+
     async def _create_group_message_from_event(self, event: AstrMessageEvent, message_type: str) -> GroupMessage:
         """从事件创建 GroupMessage 实例，并在检测到图片时同步获取描述"""
         text_content_parts = []
         images = []
         has_image_component = False
-        
+
         # 安全地获取 message_obj 和 raw_components
         message_obj = getattr(event, 'message_obj', None)
         raw_components = message_obj.message if message_obj and hasattr(message_obj, 'message') else []
@@ -466,7 +498,7 @@ class ContextEnhancerV2(Star):
                     # 如果禁用了图片描述，则添加一个简单的占位符
                     if not self.config.enable_image_caption or not self.image_caption_utils:
                         text_content_parts.append("[图片]")
-        
+
         # 如果启用了图片描述，则在此处同步处理
         if has_image_component and self.config.enable_image_caption and self.image_caption_utils:
             image_captions = []
@@ -486,28 +518,18 @@ class ContextEnhancerV2(Star):
                 except Exception as e:
                     logger.debug(f"在消息创建期间生成图片描述失败: {e}")
                     image_captions.append("图片")
-            
+
             if image_captions:
                 # 将所有图片的描述合并为一个字符串，并添加到文本内容的末尾
                 text_content_parts.append(f"[Image: {'; '.join(image_captions)}]")
 
 
-        # 1. 优先使用标准方法
-        sender_name = event.get_sender_name()
+        # 使用统一的用户信息提取方法
+        final_sender_name, final_sender_id = self._extract_user_info_from_event(event)
 
-        # 2. 如果标准方法失败，尝试从原始事件数据中获取 (兼容 aiocqhttp 等)
-        raw_event = getattr(event, 'raw_event', None)
-        if not sender_name and raw_event and isinstance(raw_event.get("sender"), dict):
-            sender = raw_event.get("sender")
-            # 优先使用群名片，其次是昵称
-            sender_name = sender.get("card") or sender.get("nickname")
-
-        # 3. 最后使用后备值 "用户"
-        final_sender_name = sender_name or "用户"
-        
         return GroupMessage(
             message_type=message_type,
-            sender_id=event.get_sender_id() or "unknown",
+            sender_id=final_sender_id,
             sender_name=final_sender_name,
             group_id=event.get_group_id(),
             text_content="".join(text_content_parts).strip(),
@@ -721,7 +743,7 @@ class ContextEnhancerV2(Star):
                 # 4. 构建上下文增强内容
                 build_start = time.monotonic()
                 context_enhancement, image_urls_for_context = self._build_context_enhancement(
-                    all_messages, request.prompt, triggering_message, scene
+                    all_messages, request.prompt, triggering_message, scene, event
                 )
                 logger.debug(f"[Profiler] _build_context_enhancement took: {(time.monotonic() - build_start) * 1000:.2f} ms")
 
@@ -793,6 +815,7 @@ class ContextEnhancerV2(Star):
         original_prompt: str,
         triggering_message: Optional[GroupMessage],
         scene: str,
+        event: AstrMessageEvent,
     ) -> tuple[str, list[str]]:
         """
         构建要追加到原始提示词的增强内容和图片URL列表。
@@ -819,7 +842,7 @@ class ContextEnhancerV2(Star):
 
         # 根据场景选择并格式化指令
         instruction_prompt = self._format_situation_instruction(
-            original_prompt, triggering_message, scene
+            original_prompt, triggering_message, scene, event
         )
 
         # 组合成最终的增强内容
@@ -888,13 +911,21 @@ class ContextEnhancerV2(Star):
         original_prompt: str,
         triggering_message: Optional[GroupMessage],
         scenario: str,
+        event: AstrMessageEvent,
     ) -> str:
         """根据场景格式化指令性提示词"""
         if scenario == "被动回复":
             # 修复 #2: 即使 triggering_message 为 None，也使用被动回复模板
             instruction = self.config.passive_reply_instruction
-            sender_name = triggering_message.sender_name if triggering_message else "未知用户"
-            sender_id = triggering_message.sender_id if triggering_message else "unknown"
+
+            # 优先从 triggering_message 获取用户信息，如果为空则从当前事件获取
+            if triggering_message:
+                sender_name = triggering_message.sender_name
+                sender_id = triggering_message.sender_id
+            else:
+                # 使用统一的用户信息提取方法
+                sender_name, sender_id = self._extract_user_info_from_event(event)
+
             return instruction.format(
                 sender_name=sender_name,
                 sender_id=sender_id,
