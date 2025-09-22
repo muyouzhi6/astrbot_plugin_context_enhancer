@@ -1,11 +1,10 @@
 {
-    "启用群组": [],
-    "最近聊天记录数量": 15,
-    "机器人回复数量": 5,
-    "上下文图片最大数量": 4,
-    "启用图片描述": true,
-    "图片描述提供商ID": "",
-    "图片描述提示词": "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息",
-    "处理@信息": true,
-    "收集机器人回复": true
+    "enabled_groups": [],
+    "recent_chats_count": 15,
+    "bot_replies_count": 5,
+    "max_images_in_context": 4,
+    "enable_image_caption": true,
+    "image_caption_provider_id": "",
+    "image_caption_prompt": "请简洁地描述这张图片的主要内容，重点关注与聊天相关的信息",
+    "collect_bot_replies": true
 }

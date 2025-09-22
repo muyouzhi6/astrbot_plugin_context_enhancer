@@ -102,4 +102,11 @@
         "hint": "告诉LLM这是它观察对话后进行的主动插话。变量: {original_prompt}",
         "default": "以上是最近的聊天记录。现在，你决定主动参与讨论，并想就以下内容发表你的看法：\"{original_prompt}\"\n你需要根据以上聊天记录和你的角色设定，自然地切入对话。"
     }
+    ,
+    "verbose_context": {
+        "description": "是否启用详细上下文模式",
+        "type": "bool",
+        "hint": "开启后，消息中的表情、回复等组件将被转换为包含更多元数据（如ID、名称）的详细文本，但这会增加Token消耗。",
+        "default": false
+    }
 }

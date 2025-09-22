@@ -23,7 +23,7 @@ class MessageUtils:
     消息处理工具类
     """
 
-    def __init__(self, config: AstrBotConfig, context: Context, image_caption_utils: ImageCaptionUtils):
+    def __init__(self, config: AstrBotConfig, context: Context, image_caption_utils: Optional[ImageCaptionUtils]):
         """初始化消息处理工具类"""
         self.config = config
         self.context = context
@@ -35,8 +35,8 @@ class MessageUtils:
             "At": self._handle_at_component,
             "AtAll": self._handle_at_all_component,
             "Reply": self._handle_reply_component,
-            "Record": lambda i: "[语音]",
-            "Video": lambda i: "[视频]",
+            "Record": self._handle_record_component,
+            "Video": self._handle_video_component,
         }
 
     async def outline_message_list(
@@ -73,16 +73,13 @@ class MessageUtils:
                 type(component).__name__, self._handle_unknown_component
             )
             
-            # 检查 handler 是否是异步的
             if asyncio.iscoroutinefunction(handler):
-                # 直接创建任务，但不立即 await
                 tasks.append(handler(component, max_depth=max_depth, current_depth=current_depth))
                 task_indices.append(i)
             else:
                 results[i] = handler(component)
 
         if tasks:
-            # 一次性执行所有异步任务
             task_results = await asyncio.gather(*tasks, return_exceptions=True)
             for i, result in zip(task_indices, task_results):
                 if isinstance(result, Exception):
@@ -101,6 +98,9 @@ class MessageUtils:
         if not image_url:
             return "[图片]"
         
+        if not self.image_caption_utils:
+            return "[图片]"
+
         try:
             caption = await self.image_caption_utils.generate_image_caption(image_url)
             return f"[图片: {caption}]" if caption else "[图片]"
@@ -115,36 +115,39 @@ class MessageUtils:
             return "[图片: 处理异常]"
 
     def _handle_face_component(self, component: Face) -> str:
-        return f"[表情:{component.id}]"
+        return f"[表情: id={component.id}, name={component.name or '未知'}]"
 
     def _handle_at_component(self, component: At) -> str:
-        return f"[At:{component.qq}{f'({component.name})' if component.name else ''}]"
+        return f"@{component.name or component.qq}"
     
     def _handle_at_all_component(self, component: AtAll) -> str:
-        return "[At:全体成员]"
+        return "[@全体成员]"
 
     async def _handle_reply_component(self, component: Reply, **kwargs) -> str:
         max_depth = kwargs.get("max_depth", 3)
         current_depth = kwargs.get("current_depth", 0)
+        
+        sender_info = f"{component.sender_nickname or '未知用户'}({component.sender_id or 'unknown'})"
+        reply_id = getattr(component, 'id', 'unknown_id')
+        base_str = f"[回复: id={reply_id}, user={sender_info}, content="
+
         if component.chain:
-            sender_info = (
-                f"{component.sender_nickname}({component.sender_id})"
-                if component.sender_nickname
-                else f"{component.sender_id}"
-            )
             reply_content = await self.outline_message_list(
                 component.chain, max_depth, current_depth + 1
             )
-            return f"[回复({sender_info}: {reply_content})]"
+            return f"{base_str}{reply_content})]"
         elif component.message_str:
-            sender_info = (
-                f"{component.sender_nickname}({component.sender_id})"
-                if component.sender_nickname
-                else f"{component.sender_id}"
-            )
-            return f"[回复({sender_info}: {component.message_str})]"
+            return f"{base_str}{component.message_str})]"
         else:
-            return "[回复消息]"
+            return f"{base_str}一条消息)]"
+            
+    def _handle_record_component(self, component: Record) -> str:
+        file_info = getattr(component, 'file', '未知文件')
+        return f"[语音: file={file_info}]"
+
+    def _handle_video_component(self, component: Video) -> str:
+        file_info = getattr(component, 'file', '未知文件')
+        return f"[视频: file={file_info}]"
 
     def _handle_unknown_component(self, component: BaseMessageComponent) -> str:
         if hasattr(component, "type"):
