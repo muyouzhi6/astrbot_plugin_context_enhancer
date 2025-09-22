@@ -193,7 +193,7 @@ class ContextEnhancerV2(Star):
         self.raw_config = config
         self.config = self._load_plugin_config()
         self._global_lock = asyncio.Lock()
-        logger.info("上下文增强器v2.0已初始化")
+        logger.info("[ContextEnhancerV2] 上下文增强器v2.0已初始化")
 
         # 初始化工具类
         self._initialize_utils()
@@ -217,6 +217,7 @@ class ContextEnhancerV2(Star):
     async def _async_init(self):
         """异步初始化部分，例如加载缓存"""
         await self._load_cache_from_file()
+        logger.info(f"成功从 {self.cache_path} 异步加载上下文缓存")
 
     async def terminate(self, context: Context):
         """插件终止时，异步持久化上下文并关闭会话"""
@@ -247,19 +248,19 @@ class ContextEnhancerV2(Star):
             logger.info(f"上下文缓存已成功原子化保存到 {self.cache_path}")
 
         except Exception as e:
-            logger.error(f"异步保存上下文缓存失败: {e}")
+            logger.error(f"[ContextEnhancerV2] 异步保存上下文缓存失败: {e}")
         finally:
             # 3. 确保清理临时文件
             if await aio_os.path.exists(temp_path):
                 try:
                     await aio_remove(temp_path)
                 except Exception as e:
-                    logger.error(f"清理临时缓存文件 {temp_path} 失败: {e}")
+                    logger.error(f"[ContextEnhancerV2] 清理临时缓存文件 {temp_path} 失败: {e}")
 
         # 关闭 aiohttp session
         if self.image_caption_utils and hasattr(self.image_caption_utils, 'close'):
             await self.image_caption_utils.close()
-            logger.info("ImageCaptionUtils 的 aiohttp session 已关闭。")
+            logger.info("[ContextEnhancerV2] ImageCaptionUtils 的 aiohttp session 已关闭。")
 
     def _load_plugin_config(self) -> PluginConfig:
         """从原始配置加载并填充插件配置类"""
@@ -291,12 +292,12 @@ class ContextEnhancerV2(Star):
                 self.image_caption_utils = ImageCaptionUtils(
                     self.context, self.raw_config
                 )
-                logger.debug("ImageCaptionUtils 初始化成功")
+                logger.debug("[ContextEnhancerV2] ImageCaptionUtils 初始化成功")
             else:
                 self.image_caption_utils = None
-                logger.warning("ImageCaptionUtils 不可用，将使用基础图片处理")
+                logger.warning("[ContextEnhancerV2] ImageCaptionUtils 不可用，将使用基础图片处理")
         except Exception as e:
-            logger.error(f"工具类初始化失败: {e}")
+            logger.error(f"[ContextEnhancerV2] 工具类初始化失败: {e}")
             self.image_caption_utils = None
 
     def _get_or_create_lock(self, group_id: str) -> Lock:
@@ -312,11 +313,11 @@ class ContextEnhancerV2(Star):
                 if content: # 确保文件内容不为空
                     data = json.loads(content)
                     self.group_messages = self._load_group_messages_from_dict(data)
-                    logger.info(f"成功从 {self.cache_path} 异步加载上下文缓存。")
+                    logger.info(f"[ContextEnhancerV2] 成功从 {self.cache_path} 异步加载上下文缓存。")
                 else:
-                    logger.info(f"缓存文件 {self.cache_path} 为空，跳过加载。")
+                    logger.info(f"[ContextEnhancerV2] 缓存文件 {self.cache_path} 为空，跳过加载。")
         except Exception as e:
-            logger.error(f"异步加载上下文缓存失败: {e}")
+            logger.error(f"[ContextEnhancerV2] 异步加载上下文缓存失败: {e}")
 
     def _load_group_messages_from_dict(
         self, data: Dict[str, list]
@@ -339,7 +340,7 @@ class ContextEnhancerV2(Star):
                     else:
                         buffers.recent_chats.append(msg)
                 except Exception as e:
-                    logger.warning(f"从字典转换并分发消息失败 (群 {group_id}): {e}")
+                    logger.warning(f"[ContextEnhancerV2] 从字典转换并分发消息失败 (群 {group_id}): {e}")
             group_buffers_map[group_id] = buffers
         return group_buffers_map
 
@@ -374,6 +375,7 @@ class ContextEnhancerV2(Star):
 
     async def _cleanup_inactive_groups(self, current_time: datetime.datetime):
         """清理超过配置天数未活跃的群组缓存"""
+        logger.info("开始清理不活跃群组...")
         inactive_threshold = datetime.timedelta(
             days=self.config.inactive_cleanup_days
         )
@@ -391,7 +393,9 @@ class ContextEnhancerV2(Star):
                     self.group_messages.pop(group_id, None)
                     self.group_last_activity.pop(group_id, None)
                     self.group_locks.pop(group_id, None)
-            logger.info("不活跃群组上下文缓存清理完毕。")
+            logger.info(f"不活跃群组上下文缓存清理完毕，共清理 {len(inactive_groups)} 个。")
+        else:
+            logger.info("没有不活跃的群组需要清理。")
 
     def is_chat_enabled(self, event: AstrMessageEvent) -> bool:
         """检查当前聊天是否启用增强功能"""
@@ -399,7 +403,7 @@ class ContextEnhancerV2(Star):
             return True  # 简化版本默认启用私聊
         
         group_id = event.get_group_id()
-        logger.debug(f"群聊启用检查: 群ID={group_id}, 启用列表={self.config.enabled_groups}")
+        logger.debug(f"[ContextEnhancerV2] 群聊启用检查: 群ID={group_id}, 启用列表={self.config.enabled_groups}")
         
         # 如果启用列表为空，则对所有群组生效；否则，检查 group_id 是否在列表中
         return not self.config.enabled_groups or group_id in self.config.enabled_groups
@@ -410,7 +414,7 @@ class ContextEnhancerV2(Star):
         start_time = time.monotonic()
         group_id = event.get_group_id()
         if event.get_message_type() == MessageType.GROUP_MESSAGE and not group_id:
-            logger.warning("事件缺少 group_id，无法处理。")
+            logger.warning("[ContextEnhancerV2] 事件缺少 group_id，无法处理。")
             return
         
         try:
@@ -427,11 +431,11 @@ class ContextEnhancerV2(Star):
                 await self._handle_group_message(event)
 
         except Exception as e:
-            logger.error(f"处理消息时发生错误: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"[ContextEnhancerV2] 处理消息时发生错误: {e}")
+            logger.error(f"[ContextEnhancerV2] {traceback.format_exc()}")
         finally:
             duration = (time.monotonic() - start_time) * 1000
-            logger.debug(f"[Profiler] on_message took: {duration:.2f} ms")
+            logger.debug(f"[Profiler] on_message for group {group_id} took: {duration:.2f} ms")
 
     def _extract_user_info_from_event(self, event: AstrMessageEvent) -> tuple[str, str]:
         """
@@ -486,7 +490,7 @@ class ContextEnhancerV2(Star):
             results = await asyncio.gather(*tasks, return_exceptions=True)
             for res in results:
                 if isinstance(res, Exception):
-                    logger.debug(f"生成图片描述失败: {res}")
+                    logger.debug(f"[ContextEnhancerV2] 生成图片描述失败: {res}")
                     captions.append("图片内容未知")
                 else:
                     captions.append(res or "图片内容未知")
@@ -538,12 +542,12 @@ class ContextEnhancerV2(Star):
         # 现在 create 方法是 async 的，需要 await
         group_msg = await self._create_group_message_from_event(event, "")  # 临时创建以检查内容
         if not group_msg.text_content and not group_msg.has_image: # 检查 has_image 以防万一
-            logger.debug("消息为空（无文本无图片），跳过处理。")
+            logger.debug("[ContextEnhancerV2] 消息为空（无文本无图片），跳过处理。")
             return
 
         try:
             if self._is_bot_message(event):
-                logger.debug("收集到机器人自己的消息，用于保持上下文完整性。")
+                logger.debug("[ContextEnhancerV2] 收集到机器人自己的消息，用于保持上下文完整性。")
 
             message_type = self._classify_message(event)
             group_msg.message_type = message_type # 更新消息类型
@@ -565,15 +569,15 @@ class ContextEnhancerV2(Star):
                 if not self._is_duplicate_message(target_deque, group_msg):
                     target_deque.append(group_msg)
                     logger.debug(
-                        f"收集群聊消息 [{message_type}]: {group_msg.sender_name} - {group_msg.text_content[:50]}..."
+                        f"收集群聊消息 [{message_type}] (群组: {group_msg.group_id}): {group_msg.sender_name} - {group_msg.text_content[:50]}..."
                     )
                 else:
                     logger.debug(
-                        f"跳过重复消息: {group_msg.sender_name} - {group_msg.text_content[:30]}..."
+                        f"[ContextEnhancerV2] 跳过重复消息: {group_msg.sender_name} - {group_msg.text_content[:30]}..."
                     )
 
         except Exception as e:
-            logger.error(f"处理群聊消息时发生错误: {e}")
+            logger.error(f"[ContextEnhancerV2] 处理群聊消息时发生错误: {e}")
 
     def _is_duplicate_message(self, target_deque: deque, new_msg: GroupMessage) -> bool:
         """检查消息是否已存在于目标缓冲区（防重复）"""
@@ -609,7 +613,7 @@ class ContextEnhancerV2(Star):
             # 如果发送者ID等于机器人ID，则是机器人自己的消息
             return bool(bot_id and sender_id and str(sender_id) == str(bot_id))
         except (AttributeError, KeyError) as e:
-            logger.warning(f"检查机器人消息时出错（可能是不支持的事件类型或数据结构）: {e}")
+            logger.warning(f"[ContextEnhancerV2] 检查机器人消息时出错（可能是不支持的事件类型或数据结构）: {e}")
             return False
 
     def _classify_message(self, event: AstrMessageEvent) -> str:
@@ -698,7 +702,7 @@ class ContextEnhancerV2(Star):
         start_time = time.monotonic()
         group_id = event.get_group_id()
         if event.get_message_type() == MessageType.GROUP_MESSAGE and not group_id:
-            logger.warning(f"LLM 请求事件缺少 group_id，无法增强上下文。")
+            logger.warning(f"[ContextEnhancerV2] LLM 请求事件缺少 group_id，无法增强上下文。")
             return
             
         try:
@@ -710,7 +714,7 @@ class ContextEnhancerV2(Star):
             group_id = event.get_group_id()
             buffers = await self._get_or_create_group_buffers(group_id)
             if not any([buffers.recent_chats, buffers.bot_replies, buffers.image_messages]):
-                logger.debug("所有消息缓冲区都为空，跳过增强")
+                logger.debug("[ContextEnhancerV2] 所有消息缓冲区都为空，跳过增强")
                 return
 
             # 3. 确定场景（被动回复 vs 主动发言）
@@ -720,7 +724,7 @@ class ContextEnhancerV2(Star):
                 collect_start = time.monotonic()
                 # deques are already sorted by timestamp implicitly
                 all_messages = list(heapq.merge(buffers.recent_chats, buffers.bot_replies, buffers.image_messages, key=lambda x: x.timestamp))
-                logger.debug(f"[Profiler] Merging messages from deques took: {(time.monotonic() - collect_start) * 1000:.2f} ms")
+                logger.debug(f"[ContextEnhancerV2] [Profiler] Merging messages from deques took: {(time.monotonic() - collect_start) * 1000:.2f} ms")
 
                 triggering_message, scene = self._find_triggering_message_from_event(all_messages, event)
 
@@ -729,17 +733,17 @@ class ContextEnhancerV2(Star):
                 context_enhancement, image_urls_for_context = self._build_context_enhancement(
                     all_messages, request.prompt, triggering_message, scene, event
                 )
-                logger.debug(f"[Profiler] _build_context_enhancement took: {(time.monotonic() - build_start) * 1000:.2f} ms")
+                logger.debug(f"[ContextEnhancerV2] [Profiler] _build_context_enhancement took: {(time.monotonic() - build_start) * 1000:.2f} ms")
 
             # 5. 将上下文注入到请求中
             self._inject_context_into_request(request, context_enhancement, image_urls_for_context)
 
         except Exception as e:
-            logger.error(f"上下文增强时发生错误: {e}")
-            logger.error(traceback.format_exc())
+            logger.error(f"[ContextEnhancerV2] 上下文增强时发生错误: {e}")
+            logger.error(f"[ContextEnhancerV2] {traceback.format_exc()}")
         finally:
             duration = (time.monotonic() - start_time) * 1000
-            logger.debug(f"[Profiler] on_llm_request took: {duration:.2f} ms")
+            logger.debug(f"[Profiler] on_llm_request for group {group_id} took: {duration:.2f} ms")
 
     def _should_enhance_context(self, event: AstrMessageEvent, request: ProviderRequest) -> bool:
         """检查是否应执行上下文增强"""
@@ -826,13 +830,13 @@ class ContextEnhancerV2(Star):
             # 核心逻辑：直接使用构建好的、包含完整指令的增强内容替换原始 prompt
             request.prompt = context_enhancement
             setattr(request, '_context_enhanced', True)  # 设置标志位
-            logger.debug(f"上下文注入完成，新prompt长度: {len(request.prompt)}")
+            logger.debug(f"[ContextEnhancerV2] 上下文注入完成，新prompt长度: {len(request.prompt)}")
 
         if image_urls:
             if not hasattr(request, 'image_urls') or request.image_urls is None:
                 request.image_urls = []
             request.image_urls.extend(image_urls)
-            logger.debug(f"向请求中追加了 {len(image_urls)} 张图片URL。")
+            logger.debug(f"[ContextEnhancerV2] 向请求中追加了 {len(image_urls)} 张图片URL。")
 
     def _find_triggering_message_from_event(self, sorted_messages: list[GroupMessage], llm_request_event: AstrMessageEvent) -> tuple[Optional[GroupMessage], str]:
         """
@@ -841,16 +845,16 @@ class ContextEnhancerV2(Star):
         nonce = getattr(llm_request_event, '_context_enhancer_nonce', None)
 
         if not nonce:
-            logger.debug("事件中未找到 nonce，判定为'主动发言'")
+            logger.debug(f"[ContextEnhancerV2] 事件中未找到 nonce (群组: {llm_request_event.get_group_id()})，判定为'主动发言'")
             return None, "主动发言"
 
         # 使用 next() 和生成器表达式更高效地查找
         trigger_message = next((msg for msg in reversed(sorted_messages) if msg.nonce == nonce), None)
 
         if trigger_message:
-            logger.debug(f"通过 nonce 成功匹配到触发消息，判定为'被动回复'")
+            logger.debug(f"通过 nonce 成功匹配到触发消息 (群组: {llm_request_event.get_group_id()})，判定为'被动回复'")
         else:
-            logger.warning(f"持有 nonce 但在缓冲区中未找到匹配的触发消息。仍判定为'被动回复'场景。")
+            logger.warning(f"持有 nonce 但在缓冲区中未找到匹配的触发消息 (群组: {llm_request_event.get_group_id()})。仍判定为'被动回复'场景。")
             
         return trigger_message, "被动回复"
 
@@ -928,10 +932,10 @@ class ContextEnhancerV2(Star):
                 async with lock:
                     buffers.bot_replies.append(bot_reply)
 
-                logger.debug(f"记录机器人回复: {response_text[:50]}...")
+                logger.debug(f"[ContextEnhancerV2] 记录机器人回复: {response_text[:50]}...")
 
         except Exception as e:
-            logger.error(f"记录机器人回复时发生错误: {e}")
+            logger.error(f"[ContextEnhancerV2] 记录机器人回复时发生错误: {e}")
 
     async def clear_context_cache(self, group_id: Optional[str] = None):
         """
@@ -948,18 +952,18 @@ class ContextEnhancerV2(Star):
                         self.group_messages.pop(group_id, None)
                         self.group_locks.pop(group_id, None)
                         self.group_last_activity.pop(group_id, None)
-                    logger.info(f"已为群组 {group_id} 清理上下文缓存。")
+                    logger.info(f"[ContextEnhancerV2] 已为群组 {group_id} 清理上下文缓存。")
             else:
                 async with self._global_lock:
                     self.group_messages.clear()
                 self.group_last_activity.clear()
-                logger.info("内存中的所有上下文缓存已清空。")
+                logger.info("[ContextEnhancerV2] 内存中的所有上下文缓存已清空。")
                 if await aio_os.path.exists(self.cache_path):
                     await aio_remove(self.cache_path)
-                    logger.info(f"持久化缓存文件 {self.cache_path} 已异步删除。")
+                    logger.info(f"[ContextEnhancerV2] 持久化缓存文件 {self.cache_path} 已异步删除。")
 
         except Exception as e:
-            logger.error(f"清空上下文缓存时发生错误: {e}")
+            logger.error(f"[ContextEnhancerV2] 清空上下文缓存时发生错误: {e}")
 
     @event_filter.command("reset", "new", description="清空当前群聊的上下文缓存")
     async def handle_clear_context_command(self, event: AstrMessageEvent):
@@ -969,4 +973,4 @@ class ContextEnhancerV2(Star):
             logger.info(f"收到为群组 {group_id} 清空上下文的命令...")
             await self.clear_context_cache(group_id=group_id)
         else:
-            logger.warning("无法获取 group_id，无法执行定向清空操作。")
+            logger.warning("[ContextEnhancerV2] 无法获取 group_id，无法执行定向清空操作。")

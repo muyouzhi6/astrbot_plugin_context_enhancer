@@ -41,7 +41,7 @@ class ImageCaptionUtils:
             provider = self.context.get_provider_by_id(provider_id)
             if provider:
                 return provider
-            logger.warning(f"无法找到指定的提供商: {provider_id}，将尝试其他选项")
+            logger.warning(f"[ContextEnhancerV2] 无法找到指定的提供商: {provider_id}，将尝试其他选项")
 
         # 2. 如果上一步失败，尝试从全局配置获取
         image_processing_config = self.config.get("image_processing", {})
@@ -50,7 +50,7 @@ class ImageCaptionUtils:
             provider = self.context.get_provider_by_id(global_provider_id)
             if provider:
                 return provider
-            logger.warning(f"无法找到全局配置的提供商: {global_provider_id}，将使用默认提供商")
+            logger.warning(f"[ContextEnhancerV2] 无法找到全局配置的提供商: {global_provider_id}，将使用默认提供商")
 
         # 3. 如果仍然失败，使用默认提供商
         return self.context.get_using_provider()
@@ -103,20 +103,20 @@ class ImageCaptionUtils:
                 try:
                     image_content = base64.b64decode(image.split(',')[1])
                 except (IndexError, ValueError):
-                    logger.warning("无法解码 Base64 图片字符串，将不计算图片哈希")
+                    logger.warning("[ContextEnhancerV2] 无法解码 Base64 图片字符串，将不计算图片哈希")
             elif image_path.is_file():
                 try:
                     async with aiofiles.open(image_path, 'rb') as f:
                         image_content = await f.read()
                     image = image_content  # 将 image 变量更新为 bytes
                 except Exception as e:
-                    logger.error(f"无法读取本地图片文件 {image_path}: {e}")
+                    logger.error(f"[ContextEnhancerV2] 无法读取本地图片文件 {image_path}: {e}")
                     return f"[无法读取图片: {image_path.name}]"
             else:
-                logger.warning(f"字符串图片源既不是有效的URL、Data URL，也不是本地文件路径: {image}")
+                logger.warning(f"[ContextEnhancerV2] 字符串图片源既不是有效的URL、Data URL，也不是本地文件路径: {image}")
                 image_url = image # 保持原样，让后续逻辑处理
         else:
-            logger.error(f"无效的图片输入源: {type(image)}")
+            logger.error(f"[ContextEnhancerV2] 无效的图片输入源: {type(image)}")
             return None
 
         # 如果 image 已被读取为 bytes，统一处理
@@ -124,7 +124,7 @@ class ImageCaptionUtils:
             image_content = image
             mime_type = self._get_image_mime_type(image)
             if mime_type is None:
-                logger.warning("无法识别图片MIME类型，将默认使用 'image/jpeg'")
+                logger.warning("[ContextEnhancerV2] 无法识别图片MIME类型，将默认使用 'image/jpeg'")
                 mime_type = 'image/jpeg'
             image_url = f"data:{mime_type};base64,{base64.b64encode(image).decode()}"
 
@@ -137,20 +137,21 @@ class ImageCaptionUtils:
         async with self._cache_lock:
             if cache_key in self._caption_cache:
                 self._caption_cache.move_to_end(cache_key)
-                logger.debug(f"命中图片描述缓存 (key: {image_hash})")
+                provider_name = provider.get_provider_name() if provider else "Unknown"
+                logger.debug(f"命中图片描述缓存 (Provider: {provider_name}, Model: {model_id}, Key: {image_hash})")
                 return self._caption_cache[cache_key]
 
         # 3. 如果缓存未命中，则调用LLM
         if not provider:
-            logger.warning("无法获取任何可用的LLM提供商")
+            logger.warning("[ContextEnhancerV2] 无法获取任何可用的LLM提供商")
             return None
 
         prompt = custom_prompt or self.config.get("image_caption_prompt", "请直接简短描述这张图片")
 
-        logger.debug(f"准备调用LLM进行图片描述...")
-        logger.debug(f"  - Provider: {provider_id or '默认'}")
-        logger.debug(f"  - Prompt: '{prompt}'")
-        logger.debug(f"  - Image URL: '{image_url[:100]}...'")
+        logger.debug(f"[ContextEnhancerV2] 准备调用LLM进行图片描述...")
+        logger.debug(f"  - [ContextEnhancerV2] Provider: {provider_id or '默认'}")
+        logger.debug(f"  - [ContextEnhancerV2] Prompt: '{prompt}'")
+        logger.debug(f"  - [ContextEnhancerV2] Image URL: '{image_url[:100]}...'")
 
         caption = await self._caption_image_with_provider(provider, prompt, [image_url], timeout)
 
@@ -160,7 +161,7 @@ class ImageCaptionUtils:
                 if len(self._caption_cache) >= CACHE_MAX_SIZE:
                     self._caption_cache.popitem(last=False)
                 self._caption_cache[cache_key] = caption
-                logger.debug(f"缓存图片描述 (key: {image_hash}): {caption}")
+                logger.debug(f"[ContextEnhancerV2] 缓存图片描述 (key: {image_hash}): {caption}")
 
         return caption
 
@@ -179,8 +180,8 @@ class ImageCaptionUtils:
             )
             return llm_response.completion_text
         except TimeoutError as e:
-            logger.warning(f"图片转述超时，超过了{timeout}秒")
+            logger.warning(f"[ContextEnhancerV2] 图片转述超时，超过了{timeout}秒")
             raise e
         except ClientError as e:
-            logger.error(f"图片转述LLM请求失败 (网络错误): {e}")
+            logger.error(f"[ContextEnhancerV2] 图片转述LLM请求失败 (网络错误): {e}")
             raise e
